@@ -4,11 +4,11 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-# --- 1. 初始化與 Token 設定 ---
+# --- 1. 初始化與安全設定 ---
 st.set_page_config(page_title="台股量價決策系統", layout="wide")
 
 # 【請填入你的 Token】
-FINMIND_TOKEN = "你的_TOKEN_貼在這裡"
+FINMIND_TOKEN = "fullgo"
 
 @st.cache_resource
 def init_dl():
@@ -18,39 +18,35 @@ def init_dl():
             loader.token = FINMIND_TOKEN
         return loader
     except Exception as e:
-        st.error(f"初始化失敗: {e}")
+        st.error(f"DataLoader 初始化失敗: {e}")
         return DataLoader()
 
 dl = init_dl()
 
-# --- 2. 核心運算函數 ---
+# --- 2. 核心資料抓取與標準化 ---
 
 @st.cache_data(ttl=3600)
 def get_stock_data(stock_id, days=180):
-    """抓取資料並強制標準化欄位名稱"""
+    """抓取資料並強制標準化欄位名稱，防止 KeyError: 'data'"""
     try:
         start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        # 使用 try-except 包裹 API 調用
         df = dl.get_data(dataset="TaiwanStockPrice", data_id=stock_id, start_date=start_date)
         
-        if df is not None and not df.empty:
-            # 強制將所有欄位轉為小寫
+        # 檢查資料格式
+        if isinstance(df, pd.DataFrame) and not df.empty:
             df.columns = [col.lower() for col in df.columns]
-            
-            # 檢查關鍵欄位是否存在，若不存在則手動映射 (處理不同 API 版本差異)
+            # 確保欄位名稱一致性
             mapping = {'max': 'high', 'min': 'low', 'trading_volume': 'volume'}
             df = df.rename(columns=mapping)
-            
-            # 確保必要欄位都存在，否則回傳空表
-            cols = ['date', 'open', 'high', 'low', 'close', 'volume']
-            if all(c in df.columns for c in cols):
-                return df[cols]
+            return df
         return pd.DataFrame()
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()
 
 def calculate_win_rate(df, days_hold=3):
     """計算量價突破後的勝率"""
-    if df is None or df.empty or len(df) < 20:
+    if df is None or df.empty or 'volume' not in df.columns or len(df) < 20:
         return 0, 0
     
     df = df.copy().reset_index(drop=True)
@@ -64,8 +60,8 @@ def calculate_win_rate(df, days_hold=3):
     wins, valid = 0, 0
     for idx in sig_indices:
         if idx + days_hold < len(df):
-            buy_price = df.iloc[idx + 1]['open'] # 隔日開盤買
-            sell_price = df.iloc[idx + days_hold]['close'] # 第N天收盤賣
+            buy_price = df.iloc[idx + 1]['open']
+            sell_price = df.iloc[idx + days_hold]['close']
             if sell_price > buy_price: wins += 1
             valid += 1
     
@@ -90,7 +86,6 @@ with tab1:
             c1.metric("量價訊號勝率", f"{wr}%")
             c2.metric("半年內訊號次數", f"{cnt} 次")
             
-        # 使用標準化後的欄位繪圖
         fig = go.Figure(data=[go.Candlestick(
             x=df_stock['date'], open=df_stock['open'], high=df_stock['high'], 
             low=df_stock['low'], close=df_stock['close'], name="K線"
@@ -99,7 +94,7 @@ with tab1:
         fig.update_layout(height=500, template="plotly_dark", yaxis2=dict(overlaying="y", side="right", showgrid=False), xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("⚠️ 無法獲取該代碼的完整量價資料，請檢查代碼或稍後再試。")
+        st.warning("⚠️ 無法獲取個股資料。請確認代碼或 Token 狀態。")
 
 with tab2:
     st.header("今日量價強勢股掃描")
@@ -107,26 +102,30 @@ with tab2:
         with st.spinner("搜尋最近交易日資料中..."):
             try:
                 found_data = False
+                # 往前尋找最近 7 天內有資料的交易日
                 for i in range(0, 7):
                     target_date = (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')
                     df_all = dl.get_data(dataset="TaiwanStockPrice", start_date=target_date, end_date=target_date)
-                    if df_all is not None and not df_all.empty:
+                    
+                    if isinstance(df_all, pd.DataFrame) and not df_all.empty:
                         df_all.columns = [col.lower() for col in df_all.columns]
                         found_data = True
                         break
                 
                 if found_data:
+                    # 計算漲幅
                     df_all['return_rate'] = round((df_all['close'] - df_all['open']) / df_all['open'] * 100, 2)
+                    # 篩選條件
                     final = df_all[(df_all['return_rate'] > 3) & (df_all['volume'] > 2000)].copy()
                     
                     if not final.empty:
                         st.success(f"✅ 掃描完成！日期：{target_date}")
                         st.dataframe(final[['stock_id', 'close', 'volume', 'return_rate']].sort_values(by='return_rate', ascending=False), use_container_width=True, hide_index=True)
                     else:
-                        st.info(f"日期 {target_date} 尚無符合條件標的。")
+                        st.info(f"日期 {target_date} 尚無符合「量大且大漲」的標的。")
                 else:
-                    st.error("❌ 無法取得資料，請檢查 Token 有效性。")
+                    st.error("❌ 無法取得近期交易資料，請確認 Token 是否填寫正確。")
             except Exception as e:
-                st.error(f"掃描失敗: {e}")
+                st.error(f"掃描發生非預期錯誤: {e}")
 
 st.caption("數據來源：FinMind API")
