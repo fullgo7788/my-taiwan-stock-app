@@ -2,13 +2,14 @@ import streamlit as st
 from FinMind.data import DataLoader
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import time
+import numpy as np
 
-# --- 1. 系統初始化 ---
+# --- 1. 初始化 ---
 st.set_page_config(page_title="高速籌碼雷達", layout="wide")
 
-# 【請填入您的 FinMind Token】
 FINMIND_TOKEN = "fullgo" 
 VIP_KEY = "ST888" 
 
@@ -21,9 +22,10 @@ def init_dl():
 
 dl = init_dl()
 
-# --- 2. 數據抓取引擎 ---
+# --- 2. 數據引擎與指標計算 ---
 def safe_get_data(dataset, data_id=None, start_date=None):
     try:
+        time.sleep(0.05)
         df = dl.get_data(dataset=dataset, data_id=data_id, start_date=start_date)
         if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
             df.columns = [col.lower() for col in df.columns]
@@ -33,6 +35,14 @@ def safe_get_data(dataset, data_id=None, start_date=None):
     except:
         pass
     return pd.DataFrame()
+
+def calculate_rsi(df, period=14):
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    # 修正除以零問題
+    rs = gain / (loss + 1e-9)
+    return 100 - (100 / (1 + rs))
 
 @st.cache_data(ttl=86400)
 def get_clean_master_info():
@@ -45,11 +55,8 @@ def get_clean_master_info():
     return pd.DataFrame()
 
 master_info = get_clean_master_info()
-if not master_info.empty:
-    stock_options = master_info['display'].tolist()
-    name_to_id = master_info.set_index('display')['stock_id'].to_dict()
-else:
-    stock_options, name_to_id = ["2330 台積電"], {"2330 台積電": "2330"}
+stock_options = master_info['display'].tolist() if not master_info.empty else ["2330 台積電"]
+name_to_id = master_info.set_index('display')['stock_id'].to_dict() if not master_info.empty else {"2330 台積電": "2330"}
 
 # --- 3. UI 介面 ---
 with st.sidebar:
@@ -60,83 +67,59 @@ with st.sidebar:
     user_key = st.text_input("💎 VIP 授權碼", type="password")
     is_vip = (user_key == VIP_KEY)
 
-tabs = st.tabs(["📊 個股診斷", "📡 強勢掃描"] + (["💎 VIP 鎖碼雷達"] if is_vip else []))
+tabs = st.tabs(["📊 技術/籌碼面", "📡 強勢掃描", "💎 VIP 鎖碼雷達"])
 
-# --- Tab 1: 個股診斷 (修正圖表不顯示問題) ---
+# --- Tab 1: 個股診斷 (技術指標+大戶) ---
 with tabs[0]:
-    start_dt = (datetime.now()-timedelta(days=150)).strftime('%Y-%m-%d')
+    start_dt = (datetime.now()-timedelta(days=200)).strftime('%Y-%m-%d')
     p_df = safe_get_data("TaiwanStockPrice", target_sid, start_dt)
     h_df = safe_get_data("TaiwanStockShareholding", target_sid, start_dt)
     
     if not p_df.empty:
-        # 資料清洗與排序
-        df = p_df.copy()
-        df = df.sort_values('date').reset_index(drop=True)
+        df = p_df.sort_values('date').reset_index(drop=True)
         df = df.rename(columns={'max':'high', 'min':'low'})
         df['ma20'] = df['close'].rolling(20).mean()
-        # 將日期轉為字串格式，避免 Plotly 解析錯誤
+        df['rsi'] = calculate_rsi(df)
         df['date_str'] = df['date'].astype(str)
         
-        st.subheader(f"📈 {target_display}")
+        # 繪圖佈局
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.7, 0.3])
         
-        fig = go.Figure()
-        
-        # 繪製 K 線
+        # K線與20MA
         fig.add_trace(go.Candlestick(
-            x=df['date_str'], 
-            open=df['open'], high=df['high'], low=df['low'], close=df['close'],
-            increasing_line_color='#FF3333', decreasing_line_color='#228B22',
-            increasing_fillcolor='#FF3333', decreasing_fillcolor='#228B22', 
-            name="K線"
-        ))
+            x=df['date_str'], open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+            increasing_line_color='#FF3333', decreasing_line_color='#228B22', name="K線"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['date_str'], y=df['ma20'], line=dict(color='#00CED1', width=1.5), name="20MA"), row=1, col=1)
         
-        # 繪製 20MA
-        fig.add_trace(go.Scatter(
-            x=df['date_str'], y=df['ma20'], 
-            line=dict(color='#00CED1', width=1.5), 
-            name="20MA"
-        ))
-        
-        # 圖表設定：修正顯示問題
-        fig.update_xaxes(
-            type='category', 
-            nticks=15, 
-            tickangle=-45,
-            rangeslider_visible=False  # 關閉滑桿增加穩定性
-        )
-        fig.update_layout(
-            height=500, 
-            template="plotly_dark", 
-            margin=dict(l=10, r=10, t=20, b=20),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        
+        # RSI
+        fig.add_trace(go.Scatter(x=df['date_str'], y=df['rsi'], line=dict(color='#E6E6FA', width=2), name="RSI(14)"), row=2, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color="#FF4B4B", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="#00FF00", row=2, col=1)
+
+        fig.update_xaxes(type='category', nticks=12)
+        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(t=30, b=30))
         st.plotly_chart(fig, use_container_width=True)
         
-        # 大戶籌碼圖
+        # 大戶籌碼
         if not h_df.empty:
-            bh = h_df[h_df.iloc[:, 2].astype(str).str.contains('1000以上')].sort_values('date')
+            c_col = next((c for c in h_df.columns if 'class' in c), h_df.columns[2])
+            bh = h_df[h_df[c_col].astype(str).str.contains('1000以上')].sort_values('date')
             bh['date_str'] = bh['date'].astype(str)
-            st.write("💎 千張大戶持股比例趨勢 (%)")
-            fig_h = go.Figure(data=[go.Scatter(
-                x=bh['date_str'], y=bh['percent'], 
-                mode='lines+markers', 
-                line=dict(color='#FFD700', width=2),
-                marker=dict(size=8)
-            )])
-            fig_h.update_xaxes(type='category', nticks=10, tickangle=-45)
-            fig_h.update_layout(height=300, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
+            st.markdown("### 💎 千張大戶持股趨勢")
+            fig_h = go.Figure(data=[go.Scatter(x=bh['date_str'], y=bh['percent'], mode='lines+markers', line=dict(color='#FFD700', width=2))])
+            fig_h.update_xaxes(type='category', nticks=8)
+            fig_h.update_layout(height=250, template="plotly_dark", margin=dict(t=10, b=10))
             st.plotly_chart(fig_h, use_container_width=True)
     else:
-        st.warning("⚠️ 無法獲取股價資料，請檢查 API Token 是否填寫正確。")
+        st.error("此標的目前無資料，請檢查代號或 API 限制。")
 
 # --- Tab 2: 強勢掃描 ---
 with tabs[1]:
-    st.subheader("📡 強勢股掃描 (漲幅>3% 且 2000張以上)")
-    if st.button("啟動雷達"):
-        with st.spinner("掃描最近交易日中..."):
+    st.subheader("📡 強勢股雷達")
+    if st.button("啟動強勢掃描"):
+        with st.spinner("搜尋最近交易日..."):
             found = False
-            for i in range(7):
+            for i in range(10):
                 d = (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')
                 all_p = safe_get_data("TaiwanStockPrice", start_date=d)
                 if not all_p.empty:
@@ -146,9 +129,17 @@ with tabs[1]:
                         if not res.empty:
                             res['漲幅%'] = round(((res['close'] / res['open']) - 1) * 100, 2)
                             res = res.merge(master_info[['stock_id', 'stock_name']], on='stock_id', how='left')
-                            st.success(f"✅ 掃描日期：{d}")
-                            st.dataframe(res[['stock_id', 'stock_name', 'close', '漲幅%', 'trading_volume']].sort_values('漲幅%', ascending=False), use_container_width=True)
-                            found = True
-                            break
-            if not found:
-                st.error("❌ 無法取得資料。")
+                            st.success(f"✅ 掃描完成！基準日期：{d}")
+                            st.dataframe(res[['stock_id', 'stock_name', 'close', '漲幅%', 'trading_volume']].sort_values('漲幅%', ascending=False))
+                            found = True; break
+            if not found: st.error("目前抓不到近期資料。")
+
+# --- Tab 3: VIP 鎖碼 (簡約版) ---
+if is_vip:
+    with tabs[2]:
+        st.subheader("🚀 資本額 30 億內鎖碼股")
+        if st.button("執行 VIP 掃描"):
+            st.info("正在計算大戶增減持...請稍候。")
+            # 此處可放入前述之 fast_radar_scan 函數邏輯
+else:
+    with tabs[2]: st.warning("🔒 請輸入 VIP 授權碼以解鎖進階掃描。")
