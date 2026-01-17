@@ -7,11 +7,13 @@ from datetime import datetime, timedelta
 import time
 
 # --- 1. 系統環境初始化 ---
-st.set_page_config(page_title="AlphaRadar 終極策略終端", layout="wide")
+st.set_page_config(page_title="AlphaRadar 終極穩定版", layout="wide")
 
+# 初始化 VIP 狀態，確保切換分頁不掉線
 if 'vip_auth' not in st.session_state:
     st.session_state.vip_auth = False
 
+# 【請替換為您的有效 Token】
 FINMIND_TOKEN = "fullgo" 
 VIP_KEY = "ST888" 
 
@@ -24,135 +26,171 @@ def get_loader():
 
 dl = get_loader()
 
-# --- 2. 防彈數據引擎 (強化修正版) ---
+# --- 2. 數據抓取引擎 (含自適應欄位修正) ---
 def safe_fetch(dataset, data_id=None, start_date=None):
+    """
+    對 API 回傳進行標準化，防止 KeyError 或資料不全導致的崩潰
+    """
     try:
-        time.sleep(0.3)
+        time.sleep(0.3) # 避免過快請求被封鎖
         df = dl.get_data(dataset=dataset, data_id=data_id, start_date=start_date)
         if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
+            # 統一轉換為小寫，解決 API 欄位大小寫不一問題
             df.columns = [col.lower() for col in df.columns]
-            # 標準化欄位：解決 Tab 2 與 Tab 3 沒反應的問題
+            
+            # 欄位映射：將各種變體統一為標準名稱
             rename_map = {
                 'trading_volume': 'volume',
                 'max': 'high',
                 'min': 'low',
-                'stock_hold_class': 'level', # 統一籌碼分級欄位
-                'stock_hold_level': 'level'
+                'stock_hold_class': 'level',
+                'stock_hold_level': 'level',
+                'stage': 'level'
             }
             df = df.rename(columns=rename_map)
-            if 'stock_id' in df.columns: df['stock_id'] = df['stock_id'].astype(str)
+            if 'stock_id' in df.columns: 
+                df['stock_id'] = df['stock_id'].astype(str)
             return df
-    except:
-        pass
+    except Exception as e:
+        print(f"API Error: {e}")
     return pd.DataFrame()
 
-# --- 3. 全市場索引引擎 (確保 100% 覆蓋) ---
+# --- 3. 全市場索引引擎 (確保 2382, 2201 100% 存在) ---
 @st.cache_data(ttl=86400)
 def get_full_universe():
-    info = safe_fetch("TaiwanStockInfo")
-    # 強力保底：確保即便 API 失敗，這些股票也絕對在選單內
-    essential = pd.DataFrame([
+    """
+    抓取全台股索引，若 API 回傳不全則啟用保底機制
+    """
+    raw_info = safe_fetch("TaiwanStockInfo")
+    
+    # 核心保底名單：確保 API 抽風時基本功能正常
+    backup_list = pd.DataFrame([
         {"stock_id": "2330", "stock_name": "台積電"},
+        {"stock_id": "2317", "stock_name": "鴻海"},
         {"stock_id": "2382", "stock_name": "廣達"},
         {"stock_id": "2201", "stock_name": "裕隆"},
         {"stock_id": "2436", "stock_name": "偉詮電"},
-        {"stock_id": "3035", "stock_name": "智原"},
-        {"stock_id": "2317", "stock_name": "鴻海"}
+        {"stock_id": "3035", "stock_name": "智原"}
     ])
-    if info.empty or 'stock_id' not in info.columns:
-        df = essential
-    else:
-        info = info[info['stock_id'].str.match(r'^\d{4}$')]
-        df = pd.concat([info, essential]).drop_duplicates('stock_id')
     
-    df['display'] = df['stock_id'] + " " + df['stock_name'].fillna("個股")
+    if raw_info.empty or 'stock_id' not in raw_info.columns:
+        df = backup_list
+    else:
+        # 過濾純 4 碼數字 (排除權證、牛熊證等雜訊)
+        raw_info = raw_info[raw_info['stock_id'].str.match(r'^\d{4}$')]
+        df = pd.concat([raw_info, backup_list]).drop_duplicates('stock_id')
+    
+    df['display_tag'] = df['stock_id'] + " " + df['stock_name'].fillna("未知")
     return df.sort_values('stock_id').reset_index(drop=True)
 
-universe_df = get_full_universe()
-stock_map = universe_df.set_index('display')['stock_id'].to_dict()
+# 載入主索引並建立字典
+master_df = get_full_universe()
+tag_to_id = master_df.set_index('display_tag')['stock_id'].to_dict()
 
 # --- 4. 側邊欄控制與 VIP 驗證 ---
 with st.sidebar:
-    st.title("🛡️ 證券策略系統")
+    st.header("⚡ 策略控制中心")
     
-    # 自動定位廣達
+    # 自動定位到廣達 (若存在)
     try:
-        q_idx = int(universe_df[universe_df['stock_id'] == "2382"].index[0])
+        start_idx = int(master_df[master_df['stock_id'] == "2382"].index[0])
     except:
-        q_idx = 0
+        start_idx = 0
 
-    sel_display = st.selectbox("🎯 全市場個股搜尋", options=universe_df['display'].tolist(), index=q_idx)
-    sel_id = stock_map[sel_display]
+    selected_display = st.selectbox(
+        "🔍 全市場搜尋 (輸入代號/名稱)",
+        options=master_df['display_tag'].tolist(),
+        index=start_idx
+    )
+    
+    # 強制連動：獲取當前選擇的 ID
+    current_sid = tag_to_id[selected_display]
     
     st.divider()
     pw_input = st.text_input("💎 VIP 授權碼", type="password")
+    # 即時驗證邏輯
     if pw_input == VIP_KEY:
         st.session_state.vip_auth = True
-        st.success("✅ VIP 已解鎖")
+        st.success("✅ VIP 權限已啟動")
     elif pw_input:
+        st.session_state.vip_auth = False
         st.error("❌ 密碼錯誤")
 
-# --- 5. 主功能區 ---
+# --- 5. 主戰情室分頁 ---
 tabs = st.tabs(["📊 技術診斷", "📡 強勢掃描", "🐳 VIP 籌碼"])
 
-# Tab 1: 技術連動
+# Tab 1: 技術診斷 (標籤與數據強連動)
 with tabs[0]:
-    st.subheader(f"📈 行情分析：{sel_display}")
-    p_df = safe_fetch("TaiwanStockPrice", sel_id, (datetime.now()-timedelta(days=200)).strftime('%Y-%m-%d'))
-    if not p_df.empty:
-        p_df = p_df.sort_values('date')
+    st.subheader(f"📈 行情診斷：{selected_display}")
+    hist = safe_fetch("TaiwanStockPrice", current_sid, (datetime.now()-timedelta(days=200)).strftime('%Y-%m-%d'))
+    
+    if not hist.empty:
+        df = hist.sort_values('date')
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-        fig.add_trace(go.Candlestick(x=p_df['date'], open=p_df['open'], high=p_df['high'], low=p_df['low'], close=p_df['close'], name="K線"), row=1, col=1)
-        fig.add_trace(go.Bar(x=p_df['date'], y=p_df['volume'], name="量", marker_color='gray'), row=2, col=1)
-        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
+        # K線
+        fig.add_trace(go.Candlestick(x=df['date'], open=df['open'], high=df['high'], 
+                                   low=df['low'], close=df['close'], name="K線"), row=1, col=1)
+        # 成交量
+        fig.add_trace(go.Bar(x=df['date'], y=df['volume'], name="量", marker_color='gray'), row=2, col=1)
+        
+        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("API 載入中，請確保 Token 有效...")
+        st.info("⚠️ 目前查無即時行情數據，請確認 API 額度。")
 
-# Tab 2: 強勢掃描
+# Tab 2: 強勢掃描 (修正沒反應問題)
 with tabs[1]:
     st.subheader("📡 全市場即時動能雷達")
-    col1, col2 = st.columns(2)
-    with col1: p_limit = st.slider("漲幅 (%)", 1.0, 10.0, 3.0)
-    with col2: v_limit = st.number_input("成交量 (張)", 500, 20000, 2000)
+    c1, c2 = st.columns(2)
+    with c1: pct_target = st.slider("漲幅門檻 (%)", 1.0, 10.0, 3.5)
+    with c2: vol_target = st.number_input("成交量門檻 (張)", 500, 20000, 2000)
     
-    if st.button("🚀 啟動全市場掃描"):
-        with st.spinner("遍歷資料中..."):
-            found = False
-            for i in range(7):
-                dt = (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')
-                all_p = safe_fetch("TaiwanStockPrice", start_date=dt)
-                if not all_p.empty and len(all_p) > 500:
-                    all_p['pct'] = ((all_p['close'] - all_p['open']) / all_p['open'] * 100).round(2)
-                    res = all_p[(all_p['pct'] >= p_limit) & (all_p['volume'] >= v_limit * 1000)].copy()
+    if st.button("🚀 執行全量掃描"):
+        with st.spinner("掃描台股 1800+ 標的中..."):
+            found_data = False
+            for i in range(7): # 自動找最近的交易日
+                check_date = (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')
+                all_prices = safe_fetch("TaiwanStockPrice", start_date=check_date)
+                
+                if not all_prices.empty and len(all_prices) > 500:
+                    all_prices['pct'] = ((all_prices['close'] - all_prices['open']) / all_prices['open'] * 100).round(2)
+                    # 篩選邏輯：成交量單位換算為張
+                    res = all_prices[
+                        (all_prices['pct'] >= pct_target) & 
+                        (all_prices['volume'] >= vol_target * 1000) &
+                        (all_prices['stock_id'].str.len() == 4)
+                    ].copy()
+                    
                     if not res.empty:
-                        res = res.merge(universe_df[['stock_id', 'stock_name']], on='stock_id', how='left')
-                        st.success(f"發現交易日：{dt}")
-                        st.dataframe(res[['stock_id', 'stock_name', 'close', 'pct', 'volume']].sort_values('pct', ascending=False), use_container_width=True, hide_index=True)
-                        found = True; break
-            if not found: st.warning("當前條件查無結果。")
+                        res = res.merge(master_df[['stock_id', 'stock_name']], on='stock_id', how='left')
+                        st.success(f"✅ 發現最新交易日：{check_date}")
+                        st.dataframe(res[['stock_id', 'stock_name', 'close', 'pct', 'volume']].sort_values('pct', ascending=False), 
+                                     use_container_width=True, hide_index=True)
+                        found_data = True
+                        break
+            if not found_data: st.warning("當前設定查無符合標的。")
 
-# Tab 3: 籌碼連動 (修復 IndexError)
+# Tab 3: VIP 籌碼 (自適應欄位修正)
 with tabs[2]:
     if st.session_state.vip_auth:
-        st.subheader(f"🐳 {sel_display} 大戶籌碼趨勢")
-        chip = safe_fetch("TaiwanStockShareholding", sel_id, (datetime.now()-timedelta(days=120)).strftime('%Y-%m-%d'))
+        st.subheader(f"🐳 {selected_display} 大戶持股趨勢")
+        chip_data = safe_fetch("TaiwanStockShareholding", current_sid, (datetime.now()-timedelta(days=120)).strftime('%Y-%m-%d'))
         
-        # 【偵錯修正重點】
-        if not chip.empty:
-            # 使用更安全的欄位搜尋，防止 IndexError
-            target_cols = [c for c in chip.columns if 'level' in c or 'class' in c]
-            if target_cols:
-                lv_col = target_cols[0]
-                # 篩選千張大戶
-                big_data = chip[chip[lv_col].astype(str).str.contains('1000以上|15')].sort_values('date')
-                if not big_data.empty:
-                    st.line_chart(big_data.set_index('date')['percent'])
+        if not chip_data.empty:
+            # 動態偵測等級欄位，解決 IndexError
+            level_cols = [c for c in chip_data.columns if any(k in c for k in ['level', 'class', 'stage', 'type'])]
+            if level_cols:
+                l_col = level_cols[0]
+                # 模糊匹配千張大戶等級 (支援不同 API 版本的值)
+                big_players = chip_data[chip_data[l_col].astype(str).str.contains('1000以上|15|999,999')].sort_values('date')
+                if not big_players.empty:
+                    st.line_chart(big_players.set_index('date')['percent'])
+                    st.metric("當前持有比例", f"{big_players['percent'].iloc[-1]}%")
                 else:
-                    st.info("查無此標的之千張大戶細節數據。")
+                    st.info("API 已回傳資料，但此標的無『1000張以上』之細項數據。")
             else:
-                st.error("API 回傳格式變更，無法解析籌碼欄位。")
+                st.error("❌ 格式異常：無法從回傳資料中辨識等級欄位。")
         else:
-            st.info("該標的暫無大戶籌碼資料回傳。")
+            st.info("暫無此標的之大戶籌碼資料。")
     else:
-        st.warning("🔒 請於側邊欄輸入 VIP 授權碼以解鎖此分頁。")
+        st.warning("🔒 VIP 專屬功能。請於側邊欄輸入授權碼解鎖。")
