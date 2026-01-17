@@ -121,35 +121,35 @@ with tabs[1]:
                 st.dataframe(res[['stock_id', 'stock_name', 'close', 'pct', 'volume']].sort_values('pct', ascending=False), use_container_width=True, hide_index=True)
 
 # --- TAB 3: 籌碼連動 ---
+# --- TAB 3 修正後的籌碼解析邏輯 ---
 with tabs[2]:
     if st.session_state.is_vip:
         chip = safe_fetch("TaiwanStockShareholding", current_sid, (datetime.now()-timedelta(days=120)).strftime('%Y-%m-%d'))
+        
         if not chip.empty:
-            lv_col = [c for c in chip.columns if any(k in c for k in ['level', 'class', 'stage'])][0]
-            big = chip[chip[lv_col].astype(str).str.contains('15|1000以上')].sort_values('date')
-            if not big.empty:
-                st.line_chart(big.set_index('date')['percent'])
-                st.metric("千張大戶持有比", f"{big['percent'].iloc[-1]}%")
-    else: st.warning("🔒 籌碼功能僅供 VIP (密碼: ST888)")
-
-# --- TAB 4: VIP 策略 (5日線上量縮收紅) ---
-with tabs[3]:
-    if st.session_state.is_vip:
-        st.subheader("💎 5日線上量縮收紅掃描")
-        v_limit = st.number_input("過濾成交量 (張)", 300, 20000, 1000, key="v4")
-        if st.button("🚀 啟動 VIP 大數據選股"):
-            with st.spinner("分析 1,800 檔個股均線與量能中..."):
-                scan_df = safe_fetch("TaiwanStockPrice", start_date=(datetime.now()-timedelta(days=15)).strftime('%Y-%m-%d'))
-                if not scan_df.empty:
-                    hits = []
-                    for sid, g in scan_df.groupby('stock_id'):
-                        if len(g) < 6: continue
-                        g = g.sort_values('date')
-                        g['ma5'] = g['close'].rolling(5).mean()
-                        t, y = g.iloc[-1], g.iloc[-2]
-                        if t['close'] > t['ma5'] and t['volume'] < y['volume'] and t['close'] > t['open'] and t['volume'] >= v_limit*1000:
-                            hits.append({'stock_id': sid, '收盤': t['close'], '今日量': int(t['volume']/1000), '昨日量': int(y['volume']/1000), 'MA5': round(t['ma5'], 2)})
-                    if hits:
-                        st.dataframe(pd.DataFrame(hits).merge(master[['stock_id', 'stock_name']], on='stock_id'), use_container_width=True, hide_index=True)
-                    else: st.warning("今日無符合標的。")
-    else: st.error("🔒 VIP 專屬策略分頁。")
+            # 【偵錯重點】安全獲取欄位名稱，避免 IndexError
+            matching_cols = [c for c in chip.columns if any(k in c for k in ['level', 'class', 'stage'])]
+            
+            if matching_cols:
+                lv_col = matching_cols[0]
+                # 關鍵：針對您提供的 15 級代碼進行過濾
+                # 確保欄位轉為字串再比對，並排除 NaN
+                big = chip[chip[lv_col].astype(str).str.contains('15|1000以上', na=False)].sort_values('date')
+                
+                if not big.empty:
+                    st.line_chart(big.set_index('date')['percent'])
+                    st.metric("千張大戶持有比", f"{big['percent'].iloc[-1]}%", 
+                              delta=f"{round(big['percent'].iloc[-1] - big['percent'].iloc[-2], 2)}%" if len(big) > 1 else None)
+                else:
+                    st.info("💡 該標的雖有籌碼資料，但查無『千張大戶(15級)』細項。")
+            else:
+                # 【備援方案】如果找不到分級欄位，嘗試尋找外資持股比
+                if 'foreigninvestmentsharesratio' in chip.columns:
+                    st.info("📡 未偵測到分級欄位，自動切換至外資持股模式")
+                    st.line_chart(chip.set_index('date')['foreigninvestmentsharesratio'])
+                else:
+                    st.error(f"無法解析此數據格式。可用欄位：{list(chip.columns)}")
+        else:
+            st.info("💡 此標的近期無籌碼週報數據回傳。")
+    else:
+        st.warning("🔒 籌碼功能僅供 VIP (密碼: ST888)")
