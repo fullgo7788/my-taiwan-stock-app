@@ -170,69 +170,54 @@ with tabs[1]:
                         break
             if not found_data: st.warning("當前設定查無符合標的。")
 
-# --- Tab 3: VIP 籌碼 (超級偵測與自動校準版) ---
+# --- Tab 3: VIP 籌碼 (大戶+外資 雙重自動適應版) ---
 with tabs[2]:
     if st.session_state.vip_auth:
-        st.subheader(f"🐳 {selected_display} 大戶籌碼趨勢")
+        st.subheader(f"🐳 {selected_display} 籌碼綜合分析")
         
-        # 抓取籌碼週資料
-        chip_data = safe_fetch(
-            "TaiwanStockShareholding", 
-            current_sid, 
-            (datetime.now()-timedelta(days=120)).strftime('%Y-%m-%d')
-        )
+        # 1. 嘗試抓取「大戶分級」資料
+        chip_df = safe_fetch("TaiwanStockShareholding", current_sid, (datetime.now()-timedelta(days=120)).strftime('%Y-%m-%d'))
         
-        if not chip_data.empty:
-            # 【偵錯模式】如果還是抓不到，取消下面這行的註釋可以看到 API 到底回傳了什麼
-            # st.write("API 回傳欄位:", list(chip_data.columns))
+        # 2. 判斷資料類型並繪圖
+        if not chip_df.empty:
+            # 偵測是否存在分級欄位 (level, class)
+            level_cols = [c for c in chip_df.columns if any(k in c for k in ['level', 'class', 'stage'])]
             
-            # 1. 深度掃描所有可能的欄位名稱
-            possible_cols = ['level', 'stock_hold_class', 'stage', 'type', 'stock_hold_level']
-            l_col = None
-            for col in chip_data.columns:
-                if any(p in col for p in possible_cols):
-                    l_col = col
-                    break
-            
-            if l_col:
-                # 2. 定義千張大戶過濾條件 (15 級或包含 1000 以上字樣)
-                # 這是台股籌碼最標準的分級制度
-                big_players = chip_data[
-                    (chip_data[l_col].astype(str) == '15') | 
-                    (chip_data[l_col].astype(str).str.contains('1000以上|999,999'))
-                ].sort_values('date')
+            if level_cols:
+                # --- 模式 A: 顯示大戶分級趨勢 ---
+                l_col = level_cols[0]
+                big_players = chip_df[chip_df[l_col].astype(str).str.contains('1000以上|15|999,999')].sort_values('date')
                 
                 if not big_players.empty:
-                    # 3. 繪製專業趨勢圖
-                    fig_chip = go.Figure()
-                    fig_chip.add_trace(go.Scatter(
-                        x=big_players['date'], 
-                        y=big_players['percent'], 
-                        mode='lines+markers',
-                        name='千張大戶持股比',
-                        line=dict(color='#00FFCC', width=3),
-                        hovertemplate="日期: %{x}<br>持股比: %{y}%"
-                    ))
-                    fig_chip.update_layout(
-                        template="plotly_dark",
-                        height=450,
-                        margin=dict(l=10, r=10, t=10, b=10),
-                        yaxis=dict(title="持股比例 (%)", gridcolor="rgba(255,255,255,0.1)"),
-                        xaxis=dict(gridcolor="rgba(255,255,255,0.1)")
-                    )
-                    st.plotly_chart(fig_chip, use_container_width=True)
-                    
-                    # 4. 數據看板
-                    last_val = big_players['percent'].iloc[-1]
-                    prev_val = big_players['percent'].iloc[-2] if len(big_players) > 1 else last_val
-                    st.metric("最新千張大戶持股比", f"{last_val}%", f"{round(last_val - prev_val, 2)}% (較上週)")
+                    st.caption("🔍 數據來源：集保中心千張大戶持股比")
+                    fig_big = go.Figure()
+                    fig_big.add_trace(go.Scatter(x=big_players['date'], y=big_players['percent'], mode='lines+markers', line=dict(color='#00FFCC', width=3)))
+                    fig_big.update_layout(template="plotly_dark", height=400, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="持股比 (%)")
+                    st.plotly_chart(fig_big, use_container_width=True)
+                    st.metric("千張大戶比例", f"{big_players['percent'].iloc[-1]}%", f"{round(big_players['percent'].iloc[-1] - big_players['percent'].iloc[-2], 2) if len(big_players)>1 else 0}%")
                 else:
-                    st.info(f"⚠️ 雖然找到欄位 '{l_col}'，但查無符合 1000 張以上的數據。")
-                    # 顯示可用的級別供參考
-                    st.write("目前資料分級包含：", chip_data[l_col].unique().tolist())
+                    st.info("此標的目前無 1000 張以上之大戶細節數據。")
+            
+            elif 'foreigninvestmentsharesratio' in chip_df.columns:
+                # --- 模式 B: 顯示外資持股趨勢 (自動切換) ---
+                st.caption("📡 偵測到外資持股格式 - 自動切換分析模式")
+                fig_foreign = go.Figure()
+                fig_foreign.add_trace(go.Scatter(
+                    x=chip_df['date'], 
+                    y=chip_df['foreigninvestmentsharesratio'], 
+                    mode='lines', 
+                    fill='tozeroy',
+                    line=dict(color='#FF3366', width=2),
+                    name='外資持股比'
+                ))
+                fig_foreign.update_layout(template="plotly_dark", height=400, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="外資比 (%)")
+                st.plotly_chart(fig_foreign, use_container_width=True)
+                
+                last_f = chip_df['foreigninvestmentsharesratio'].iloc[-1]
+                st.metric("外資持股比例", f"{last_f}%")
             else:
-                st.error(f"❌ 無法辨識籌碼欄位。當前回傳欄位為: {list(chip_data.columns)}")
+                st.error(f"❌ 無法辨識回傳格式。欄位：{list(chip_df.columns)}")
         else:
-            st.info("💡 此標的近期無籌碼變動資料回傳（通常大型股每週末更新一次）。")
+            st.info("💡 暫無籌碼變動資料回傳，請確認個股代號是否正確。")
     else:
-        st.warning("🔒 此為 VIP 專屬功能，請在左側輸入授權碼解鎖。")
+        st.warning("🔒 VIP 專屬功能：請在左側輸入正確授權碼以解鎖籌碼與外資趨勢。")
