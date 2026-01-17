@@ -21,10 +21,9 @@ def init_dl():
 
 dl = init_dl()
 
-# --- 2. 數據抓取與名稱校正 ---
+# --- 2. 數據抓取引擎 ---
 def safe_get_data(dataset, data_id=None, start_date=None):
     try:
-        time.sleep(0.1)
         df = dl.get_data(dataset=dataset, data_id=data_id, start_date=start_date)
         if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
             df.columns = [col.lower() for col in df.columns]
@@ -63,45 +62,79 @@ with st.sidebar:
 
 tabs = st.tabs(["📊 個股診斷", "📡 強勢掃描"] + (["💎 VIP 鎖碼雷達"] if is_vip else []))
 
-# --- Tab 1: 個股診斷 (修正 X 軸為連續排列) ---
+# --- Tab 1: 個股診斷 (修正圖表不顯示問題) ---
 with tabs[0]:
     start_dt = (datetime.now()-timedelta(days=150)).strftime('%Y-%m-%d')
     p_df = safe_get_data("TaiwanStockPrice", target_sid, start_dt)
     h_df = safe_get_data("TaiwanStockShareholding", target_sid, start_dt)
     
     if not p_df.empty:
-        df = p_df.rename(columns={'max':'high', 'min':'low'})
+        # 資料清洗與排序
+        df = p_df.copy()
+        df = df.sort_values('date').reset_index(drop=True)
+        df = df.rename(columns={'max':'high', 'min':'low'})
         df['ma20'] = df['close'].rolling(20).mean()
+        # 將日期轉為字串格式，避免 Plotly 解析錯誤
+        df['date_str'] = df['date'].astype(str)
         
         st.subheader(f"📈 {target_display}")
+        
         fig = go.Figure()
         
-        # K線配置 (紅漲、深綠跌)
+        # 繪製 K 線
         fig.add_trace(go.Candlestick(
-            x=df['date'], open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+            x=df['date_str'], 
+            open=df['open'], high=df['high'], low=df['low'], close=df['close'],
             increasing_line_color='#FF3333', decreasing_line_color='#228B22',
-            increasing_fillcolor='#FF3333', decreasing_fillcolor='#228B22', name="K線"
+            increasing_fillcolor='#FF3333', decreasing_fillcolor='#228B22', 
+            name="K線"
         ))
-        fig.add_trace(go.Scatter(x=df['date'], y=df['ma20'], line=dict(color='#00CED1', width=1.5), name="20MA"))
         
-        # 【關鍵修正】設定 X 軸類型為 category，排除未交易日的空格
-        fig.update_xaxes(type='category', nticks=10) 
-        fig.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False)
+        # 繪製 20MA
+        fig.add_trace(go.Scatter(
+            x=df['date_str'], y=df['ma20'], 
+            line=dict(color='#00CED1', width=1.5), 
+            name="20MA"
+        ))
+        
+        # 圖表設定：修正顯示問題
+        fig.update_xaxes(
+            type='category', 
+            nticks=15, 
+            tickangle=-45,
+            rangeslider_visible=False  # 關閉滑桿增加穩定性
+        )
+        fig.update_layout(
+            height=500, 
+            template="plotly_dark", 
+            margin=dict(l=10, r=10, t=20, b=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        
         st.plotly_chart(fig, use_container_width=True)
         
+        # 大戶籌碼圖
         if not h_df.empty:
             bh = h_df[h_df.iloc[:, 2].astype(str).str.contains('1000以上')].sort_values('date')
+            bh['date_str'] = bh['date'].astype(str)
             st.write("💎 千張大戶持股比例趨勢 (%)")
-            fig_h = go.Figure(data=[go.Scatter(x=bh['date'], y=bh['percent'], mode='lines+markers', line=dict(color='#FFD700', width=2))])
-            fig_h.update_xaxes(type='category', nticks=5)
-            fig_h.update_layout(height=250, template="plotly_dark")
+            fig_h = go.Figure(data=[go.Scatter(
+                x=bh['date_str'], y=bh['percent'], 
+                mode='lines+markers', 
+                line=dict(color='#FFD700', width=2),
+                marker=dict(size=8)
+            )])
+            fig_h.update_xaxes(type='category', nticks=10, tickangle=-45)
+            fig_h.update_layout(height=300, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
             st.plotly_chart(fig_h, use_container_width=True)
+    else:
+        st.warning("⚠️ 無法獲取股價資料，請檢查 API Token 是否填寫正確。")
 
-# --- Tab 2: 強勢掃描 (偵錯並確保數據產出) ---
+# --- Tab 2: 強勢掃描 ---
 with tabs[1]:
-    st.subheader("📡 強勢股掃描")
-    if st.button("啟動強勢雷達"):
-        with st.spinner("搜尋最近交易日數據..."):
+    st.subheader("📡 強勢股掃描 (漲幅>3% 且 2000張以上)")
+    if st.button("啟動雷達"):
+        with st.spinner("掃描最近交易日中..."):
             found = False
             for i in range(7):
                 d = (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')
@@ -113,9 +146,9 @@ with tabs[1]:
                         if not res.empty:
                             res['漲幅%'] = round(((res['close'] / res['open']) - 1) * 100, 2)
                             res = res.merge(master_info[['stock_id', 'stock_name']], on='stock_id', how='left')
-                            st.success(f"✅ 已找到資料：{d}")
+                            st.success(f"✅ 掃描日期：{d}")
                             st.dataframe(res[['stock_id', 'stock_name', 'close', '漲幅%', 'trading_volume']].sort_values('漲幅%', ascending=False), use_container_width=True)
                             found = True
                             break
             if not found:
-                st.error("❌ 抓不到資料，請檢查 Token 或稍後再試。")
+                st.error("❌ 無法取得資料。")
