@@ -9,11 +9,10 @@ import time
 # --- 1. 系統初始化 ---
 st.set_page_config(page_title="AlphaRadar 專業終端", layout="wide")
 
-# 初始化 Session State (鎖定狀態，防止切換分頁失效)
 if 'is_vip' not in st.session_state: st.session_state.is_vip = False
 if 'current_sid' not in st.session_state: st.session_state.current_sid = "2330"
 
-FINMIND_TOKEN = "fullgo" # 建議填入您的 Token
+FINMIND_TOKEN = "fullgo" 
 VIP_KEY = "ST888" 
 
 @st.cache_resource
@@ -24,14 +23,13 @@ def get_loader():
 
 dl = get_loader()
 
-# --- 2. 核心數據引擎 (具備欄位防護與容錯) ---
+# --- 2. 核心數據引擎 (具備容錯與標準化) ---
 def safe_fetch(dataset, data_id=None, start_date=None):
     try:
         time.sleep(0.3) 
         df = dl.get_data(dataset=dataset, data_id=data_id, start_date=start_date)
         if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
             df.columns = [col.lower() for col in df.columns]
-            # 統一所有 API 欄位命名，防止均線與量能計算錯誤
             df = df.rename(columns={
                 'trading_volume': 'volume', 'max': 'high', 'min': 'low',
                 'stock_hold_class': 'level', 'stock_hold_level': 'level', 'stage': 'level'
@@ -41,7 +39,7 @@ def safe_fetch(dataset, data_id=None, start_date=None):
     except: pass
     return pd.DataFrame()
 
-# --- 3. 全市場索引 (確保個股搜尋連動) ---
+# --- 3. 索引引擎 ---
 @st.cache_data(ttl=86400)
 def get_universe():
     raw = safe_fetch("TaiwanStockInfo")
@@ -62,11 +60,9 @@ def get_universe():
 master_df = get_universe()
 tag_map = master_df.set_index('display')['stock_id'].to_dict()
 
-# --- 4. 側邊欄控制中心 (VIP 與 連動核心) ---
+# --- 4. 側邊欄控制中心 ---
 with st.sidebar:
     st.header("⚡ 策略控制台")
-    
-    # 強制連動邏輯
     try:
         curr_idx = int(master_df[master_df['stock_id'] == st.session_state.current_sid].index[0])
     except:
@@ -77,18 +73,17 @@ with st.sidebar:
     current_sid = st.session_state.current_sid
     
     st.divider()
-    pw = st.text_input("💎 VIP 授權碼", type="password", help="輸入 ST888 解鎖全站功能")
+    pw = st.text_input("💎 VIP 授權碼", type="password")
     if pw == VIP_KEY:
         st.session_state.is_vip = True
-        st.success("✅ VIP 已啟動")
+        st.success("✅ VIP 已解鎖")
     elif pw != "":
         st.session_state.is_vip = False
-        st.error("密碼錯誤")
 
 # --- 5. 主分頁區 (TAB 1-4) ---
-tabs = st.tabs(["📊 技術診斷", "📡 基礎掃描", "🐳 籌碼連動", "💎 VIP 策略"])
+tabs = st.tabs(["📊 技術診斷", "📡 基礎掃描", "🐳 籌碼連動", "💎 VIP 策略選股"])
 
-# --- TAB 1: 技術診斷 (標籤已取消，均線 MA5/20/60) ---
+# --- TAB 1: 技術診斷 (強制繪製 K 線 + MA) ---
 with tabs[0]:
     hist = safe_fetch("TaiwanStockPrice", current_sid, (datetime.now()-timedelta(days=250)).strftime('%Y-%m-%d'))
     if not hist.empty:
@@ -97,7 +92,68 @@ with tabs[0]:
         df['ma20'] = df['close'].rolling(20).mean()
         df['ma60'] = df['close'].rolling(60).mean()
         
+        # 繪圖引擎
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
         fig.add_trace(go.Candlestick(x=df['date'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="K線"), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['date'], y=df['ma5'], name="MA5", line=dict(color='white', width=1)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['date'], y=df['ma20'], name="MA20", line=dict(color='yellow', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['date'], y=df['ma60'], name="MA60", line=dict(color='magenta', width=2)), row=1, col=1)
+        fig.add_trace(go.Bar(x=df['date'], y=df['volume'], name="量", marker_color='gray', opacity=0.5), row=2, col=1)
+        
+        fig.update_layout(height=650, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(t=10, b=10), hovermode='x unified')
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# --- TAB 2: 基礎掃描 ---
+with tabs[1]:
+    v_min = st.number_input("最低成交量 (張)", 300, 20000, 1000)
+    if st.button("🚀 執行漲勢掃描"):
+        all_p = safe_fetch("TaiwanStockPrice", start_date=(datetime.now()-timedelta(days=7)).strftime('%Y-%m-%d'))
+        if not all_p.empty:
+            dt = all_p['date'].max()
+            res = all_p[(all_p['date'] == dt) & (all_p['volume'] >= v_min*1000)].copy()
+            res['pct'] = ((res['close'] - res['open']) / res['open'] * 100).round(2)
+            res = res[res['pct'] > 2].merge(master_df[['stock_id', 'stock_name']], on='stock_id', how='left')
+            st.dataframe(res[['stock_id', 'stock_name', 'close', 'pct', 'volume']].sort_values('pct', ascending=False), use_container_width=True)
+
+# --- TAB 3: 籌碼連動 (確保圖表顯示) ---
+with tabs[2]:
+    if st.session_state.is_vip:
+        chip = safe_fetch("TaiwanStockShareholding", current_sid, (datetime.now()-timedelta(days=120)).strftime('%Y-%m-%d'))
+        if not chip.empty:
+            match_cols = [c for c in chip.columns if any(k in c for k in ['level', 'class', 'stage'])]
+            if match_cols:
+                lv_col = match_cols[0]
+                big = chip[chip[lv_col].astype(str).str.contains('15|1000以上', na=False)].sort_values('date')
+                if not big.empty:
+                    # 使用 plotly 繪製籌碼圖以確保兼容性
+                    chip_fig = go.Figure()
+                    chip_fig.add_trace(go.Scatter(x=big['date'], y=big['percent'], mode='lines+markers', name="千張大戶持有比", line=dict(color='cyan')))
+                    chip_fig.update_layout(height=400, template="plotly_dark", title=f"{sel_tag} 大戶籌碼趨勢", margin=dict(t=40))
+                    st.plotly_chart(chip_fig, use_container_width=True)
+                    st.metric("當前持有比", f"{big['percent'].iloc[-1]}%")
+            else:
+                st.info("無法獲取分級資料，改顯示外資持股比")
+                st.line_chart(chip.set_index('date')['foreigninvestmentsharesratio'])
+    else:
+        st.warning("🔒 VIP 專屬功能 (ST888)")
+
+
+# --- TAB 4: VIP 策略選股 ---
+with tabs[3]:
+    if st.session_state.is_vip:
+        st.subheader("💎 VIP 策略：五日線上量縮收紅")
+        v_limit_4 = st.number_input("過濾成交量 (張)", 300, 20000, 1000, key="v4_final")
+        if st.button("🚀 啟動 VIP 全市場大數據選股"):
+            with st.spinner("掃描中..."):
+                df_vip = safe_fetch("TaiwanStockPrice", start_date=(datetime.now()-timedelta(days=20)).strftime('%Y-%m-%d'))
+                if not df_vip.empty:
+                    latest = df_vip['date'].max()
+                    hits = []
+                    for sid, g in df_vip.groupby('stock_id'):
+                        if len(g) < 6: continue
+                        g = g.sort_values('date')
+                        g['ma5'] = g['close'].rolling(5).mean()
+                        t, y = g.iloc[-1], g.iloc[-2]
+                        if t['date'] == latest and t['close'] > t['ma5'] and t['volume'] < y['volume'] and t['close'] > t['open'] and t['volume'] >= v_limit_4*1000:
+                            hits.append({'stock_id': sid, '收盤': t['close'], '今日量': int(t['volume']/10
