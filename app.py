@@ -137,7 +137,7 @@ with tabs[1]:
                             found = True; break
             if not found: st.info("近期無符合條件標的。")
 
-# --- Tab 3: VIP 鎖碼雷達 ---
+# --- Tab 3: VIP 鎖碼雷達 (穩定度強化版) ---
 with tabs[2]:
     if not st.session_state.vip_auth:
         st.warning("🔒 請在左側輸入授權碼 ST888 並按 Enter 解鎖。")
@@ -145,33 +145,55 @@ with tabs[2]:
         st.subheader("🚀 鎖碼雷達 (追蹤大戶集結標的)")
         if st.button("執行籌碼穿透分析", key="vip_deep_scan"):
             p = st.progress(0); s = st.empty()
-            with st.spinner("分析中..."):
+            with st.spinner("正在穿透籌碼數據，請稍候約 15-20 秒..."):
                 t_df = pd.DataFrame()
-                for i in range(7):
+                # 1. 抓取近期熱門股
+                for i in range(10):
                     d = (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')
                     t_df = safe_get_data("TaiwanStockPrice", start_date=d)
                     if not t_df.empty: break
                 
                 if not t_df.empty:
-                    cands = t_df[t_df['stock_id'].isin(master_info['stock_id'])].sort_values('volume', ascending=False).head(12)
+                    # 取成交量前 12 名，並過濾掉權證或奇怪的編號
+                    cands = t_df[t_df['stock_id'].str.len() == 4].sort_values('volume', ascending=False).head(12)
                     final_list = []
+                    
                     for idx, row in enumerate(cands.iterrows()):
                         sid = row[1]['stock_id']
                         s.text(f"🔍 正在穿透: {sid} ({idx+1}/12)")
                         p.progress((idx+1)/12)
-                        h = safe_get_data("TaiwanStockShareholding", sid, (datetime.now()-timedelta(days=25)).strftime('%Y-%m-%d'))
+                        
+                        # 核心修復：擴大抓取範圍到 45 天，確保至少有兩個週期的週報數據
+                        h = safe_get_data("TaiwanStockShareholding", sid, (datetime.now()-timedelta(days=45)).strftime('%Y-%m-%d'))
+                        
                         if not h.empty:
+                            # 找出 1000張以上的 class
                             c_col = next((c for c in h.columns if 'class' in c), None)
                             if c_col:
+                                # 篩選千張大戶並按日期排序
                                 bh = h[h[c_col].astype(str).str.contains('1000以上')].sort_values('date')
-                                if len(bh) >= 2 and bh['percent'].iloc[-1] > bh['percent'].iloc[-2]:
-                                    final_list.append({
-                                        "代號": sid, 
-                                        "名稱": id_to_name.get(sid, ""), 
-                                        "大戶增幅": f"{round(bh['percent'].iloc[-1]-bh['percent'].iloc[-2], 2)}%"
-                                    })
+                                if len(bh) >= 2:
+                                    last_percent = bh['percent'].iloc[-1]
+                                    prev_percent = bh['percent'].iloc[-2]
+                                    diff = last_percent - prev_percent
+                                    
+                                    # 只要大戶有增加就記錄
+                                    if diff > 0:
+                                        final_list.append({
+                                            "代號": sid, 
+                                            "名稱": id_to_name.get(sid, "未知"), 
+                                            "最新持股%": f"{last_percent}%",
+                                            "大戶增幅": f"+{round(diff, 2)}%"
+                                        })
+                        # 額外延遲，防止被 API 封鎖
+                        time.sleep(0.5)
+                        
                     s.empty(); p.empty()
+                    
                     if final_list: 
+                        st.balloons() # 成功找到時噴彩帶
                         st.table(pd.DataFrame(final_list).sort_values("大戶增幅", ascending=False))
                     else: 
-                        st.info("今日無大戶明顯增持標的。")
+                        st.info("💡 掃描完成。今日熱門股中，千張大戶持股與上週相比多為減持或持平。")
+                else:
+                    st.error("❌ 無法獲取全市場行情資料，請確認 API Token 或稍後再試。")
