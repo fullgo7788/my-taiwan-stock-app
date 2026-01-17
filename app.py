@@ -170,27 +170,69 @@ with tabs[1]:
                         break
             if not found_data: st.warning("當前設定查無符合標的。")
 
-# Tab 3: VIP 籌碼 (自適應欄位修正)
+# --- Tab 3: VIP 籌碼 (超級偵測與自動校準版) ---
 with tabs[2]:
     if st.session_state.vip_auth:
-        st.subheader(f"🐳 {selected_display} 大戶持股趨勢")
-        chip_data = safe_fetch("TaiwanStockShareholding", current_sid, (datetime.now()-timedelta(days=120)).strftime('%Y-%m-%d'))
+        st.subheader(f"🐳 {selected_display} 大戶籌碼趨勢")
+        
+        # 抓取籌碼週資料
+        chip_data = safe_fetch(
+            "TaiwanStockShareholding", 
+            current_sid, 
+            (datetime.now()-timedelta(days=120)).strftime('%Y-%m-%d')
+        )
         
         if not chip_data.empty:
-            # 動態偵測等級欄位，解決 IndexError
-            level_cols = [c for c in chip_data.columns if any(k in c for k in ['level', 'class', 'stage', 'type'])]
-            if level_cols:
-                l_col = level_cols[0]
-                # 模糊匹配千張大戶等級 (支援不同 API 版本的值)
-                big_players = chip_data[chip_data[l_col].astype(str).str.contains('1000以上|15|999,999')].sort_values('date')
+            # 【偵錯模式】如果還是抓不到，取消下面這行的註釋可以看到 API 到底回傳了什麼
+            # st.write("API 回傳欄位:", list(chip_data.columns))
+            
+            # 1. 深度掃描所有可能的欄位名稱
+            possible_cols = ['level', 'stock_hold_class', 'stage', 'type', 'stock_hold_level']
+            l_col = None
+            for col in chip_data.columns:
+                if any(p in col for p in possible_cols):
+                    l_col = col
+                    break
+            
+            if l_col:
+                # 2. 定義千張大戶過濾條件 (15 級或包含 1000 以上字樣)
+                # 這是台股籌碼最標準的分級制度
+                big_players = chip_data[
+                    (chip_data[l_col].astype(str) == '15') | 
+                    (chip_data[l_col].astype(str).str.contains('1000以上|999,999'))
+                ].sort_values('date')
+                
                 if not big_players.empty:
-                    st.line_chart(big_players.set_index('date')['percent'])
-                    st.metric("當前持有比例", f"{big_players['percent'].iloc[-1]}%")
+                    # 3. 繪製專業趨勢圖
+                    fig_chip = go.Figure()
+                    fig_chip.add_trace(go.Scatter(
+                        x=big_players['date'], 
+                        y=big_players['percent'], 
+                        mode='lines+markers',
+                        name='千張大戶持股比',
+                        line=dict(color='#00FFCC', width=3),
+                        hovertemplate="日期: %{x}<br>持股比: %{y}%"
+                    ))
+                    fig_chip.update_layout(
+                        template="plotly_dark",
+                        height=450,
+                        margin=dict(l=10, r=10, t=10, b=10),
+                        yaxis=dict(title="持股比例 (%)", gridcolor="rgba(255,255,255,0.1)"),
+                        xaxis=dict(gridcolor="rgba(255,255,255,0.1)")
+                    )
+                    st.plotly_chart(fig_chip, use_container_width=True)
+                    
+                    # 4. 數據看板
+                    last_val = big_players['percent'].iloc[-1]
+                    prev_val = big_players['percent'].iloc[-2] if len(big_players) > 1 else last_val
+                    st.metric("最新千張大戶持股比", f"{last_val}%", f"{round(last_val - prev_val, 2)}% (較上週)")
                 else:
-                    st.info("API 已回傳資料，但此標的無『1000張以上』之細項數據。")
+                    st.info(f"⚠️ 雖然找到欄位 '{l_col}'，但查無符合 1000 張以上的數據。")
+                    # 顯示可用的級別供參考
+                    st.write("目前資料分級包含：", chip_data[l_col].unique().tolist())
             else:
-                st.error("❌ 格式異常：無法從回傳資料中辨識等級欄位。")
+                st.error(f"❌ 無法辨識籌碼欄位。當前回傳欄位為: {list(chip_data.columns)}")
         else:
-            st.info("暫無此標的之大戶籌碼資料。")
+            st.info("💡 此標的近期無籌碼變動資料回傳（通常大型股每週末更新一次）。")
     else:
-        st.warning("🔒 VIP 專屬功能。請於側邊欄輸入授權碼解鎖。")
+        st.warning("🔒 此為 VIP 專屬功能，請在左側輸入授權碼解鎖。")
