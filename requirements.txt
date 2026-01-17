@@ -1,5 +1,6 @@
 streamlit
-FinMind
 pandas
 plotly
 requests
+tqdm
+FinMind
