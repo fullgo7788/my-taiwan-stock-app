@@ -9,7 +9,6 @@ import time
 # --- 1. 系統初始化 ---
 st.set_page_config(page_title="高速籌碼雷達", layout="wide")
 
-# 初始化驗證狀態
 if 'vip_auth' not in st.session_state:
     st.session_state.vip_auth = False
 
@@ -26,7 +25,7 @@ def init_dl():
 
 dl = init_dl()
 
-# --- 2. 數據引擎 (解決欄位不對稱與延遲問題) ---
+# --- 2. 數據引擎 ---
 def safe_get_data(dataset, data_id=None, start_date=None):
     for attempt in range(2):
         try:
@@ -34,7 +33,6 @@ def safe_get_data(dataset, data_id=None, start_date=None):
             df = dl.get_data(dataset=dataset, data_id=data_id, start_date=start_date)
             if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
                 df.columns = [col.lower() for col in df.columns]
-                # 強制轉換 FinMind 不同介面的命名差異
                 rename_map = {'max': 'high', 'min': 'low', 'trading_volume': 'volume'}
                 df = df.rename(columns=rename_map)
                 if 'stock_id' in df.columns: df['stock_id'] = df['stock_id'].astype(str)
@@ -58,29 +56,28 @@ def get_clean_master_info():
     df['display'] = df['stock_id'] + " " + df['stock_name']
     return df
 
-# --- 3. 處理狀態同步 ---
 master_info = get_clean_master_info()
 name_to_id = master_info.set_index('display')['stock_id'].to_dict()
 id_to_name = master_info.set_index('stock_id')['stock_name'].to_dict()
 
+# --- 3. UI 側邊欄 ---
 with st.sidebar:
     st.header("⚡ 戰情控制中心")
-    # 全域驅動選單
     target_display = st.selectbox("🎯 選擇個股", options=list(name_to_id.keys()), index=0, key="global_selector")
     sel_sid = name_to_id[target_display]
     sel_sname = id_to_name.get(sel_sid, "未知")
     
     st.divider()
-    pw = st.text_input("💎 VIP 授權碼", type="password", help="輸入 ST888 並按 Enter")
+    pw = st.text_input("💎 VIP 授權碼", type="password")
     if pw == VIP_KEY:
         st.session_state.vip_auth = True
-        st.success("✅ VIP 權限已解鎖")
+        st.success("✅ VIP 已解鎖")
     else:
         st.session_state.vip_auth = False
 
 tabs = st.tabs(["📊 趨勢診斷", "📡 強勢掃描", "💎 VIP 鎖碼雷達"])
 
-# --- Tab 1: 趨勢診斷 (四層指標圖) ---
+# --- Tab 1: 趨勢診斷 ---
 with tabs[0]:
     st.subheader(f"🔍 診斷報告：{sel_sid} {sel_sname}")
     start_dt = (datetime.now()-timedelta(days=360)).strftime('%Y-%m-%d')
@@ -88,38 +85,29 @@ with tabs[0]:
     
     if not p_df.empty:
         df = p_df.sort_values('date').reset_index(drop=True)
-        # 指標計算
         df['ma5'] = df['close'].rolling(5).mean()
         df['ma20'] = df['close'].rolling(20).mean()
         df['bias'] = ((df['close'] - df['ma20']) / df['ma20']) * 100
-        # RSI
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
         df['date_str'] = df['date'].dt.strftime('%Y-%m-%d')
         
-        # 建立 4 層視窗
-        fig = make_subplots(
-            rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, 
-            row_heights=[0.4, 0.1, 0.25, 0.25],
-            subplot_titles=("", "", "RSI (14)", "20MA 乖離率 (%)")
-        )
+        fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, 
+                           row_heights=[0.4, 0.1, 0.25, 0.25],
+                           subplot_titles=("", "", "RSI (14)", "20MA 乖離率 (%)"))
         
-        # 1. K線與均線
         fig.add_trace(go.Candlestick(x=df['date_str'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="K線"), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['date_str'], y=df['ma20'], name="20MA", line=dict(color='#FFD700', width=1.5)), row=1, col=1)
         
-        # 2. 成交量
         v_colors = ['#FF3333' if c >= o else '#228B22' for c, o in zip(df['close'], df['open'])]
         fig.add_trace(go.Bar(x=df['date_str'], y=df['volume'], name="量", marker_color=v_colors), row=2, col=1)
         
-        # 3. RSI
         fig.add_trace(go.Scatter(x=df['date_str'], y=df['rsi'], name="RSI", line=dict(color='#E195FF')), row=3, col=1)
         fig.add_hline(y=70, line_dash="dot", line_color="red", row=3, col=1)
         fig.add_hline(y=30, line_dash="dot", line_color="green", row=3, col=1)
         
-        # 4. 乖離率
         fig.add_trace(go.Scatter(x=df['date_str'], y=df['bias'], name="乖離", line=dict(color='#00FF00'), fill='tozeroy'), row=4, col=1)
         fig.add_hline(y=0, line_color="white", row=4, col=1)
 
@@ -177,4 +165,13 @@ with tabs[2]:
                             if c_col:
                                 bh = h[h[c_col].astype(str).str.contains('1000以上')].sort_values('date')
                                 if len(bh) >= 2 and bh['percent'].iloc[-1] > bh['percent'].iloc[-2]:
-                                    final_list.append({"代號": sid, "名稱": id_to_name.get
+                                    final_list.append({
+                                        "代號": sid, 
+                                        "名稱": id_to_name.get(sid, ""), 
+                                        "大戶增幅": f"{round(bh['percent'].iloc[-1]-bh['percent'].iloc[-2], 2)}%"
+                                    })
+                    s.empty(); p.empty()
+                    if final_list: 
+                        st.table(pd.DataFrame(final_list).sort_values("大戶增幅", ascending=False))
+                    else: 
+                        st.info("今日無大戶明顯增持標的。")
