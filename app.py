@@ -1,3 +1,5 @@
+dl = DataLoader()
+dl.login(token="你的_FINMIND_TOKEN")
 import streamlit as st
 from FinMind.data import DataLoader
 import pandas as pd
@@ -57,6 +59,17 @@ st.title("🏹 台股量價籌碼決策系統")
 tab1, tab2 = st.tabs(["📊 個股深度診斷", "📡 全市場閃電掃描"])
 
 # --- Tab 1: 個股診斷 ---
+with tab1:
+    # ... (前面的輸入框代碼)
+    df = get_stock_data(sid)
+    
+    if not df.empty:
+        # 這裡才執行計算勝率與繪圖
+        win_rate, count = calculate_win_rate(df, days_hold=hold_days)
+        # ... (繪圖程式碼)
+    else:
+        st.warning(f"⚠️ 無法取得股票 {sid} 的資料。")
+        st.info("💡 可能原因：\n1. 請求過於頻繁 (API Limit)\n2. 股票代碼輸入錯誤\n3. 非交易日或資料尚未更新")
 with tab1:
     col_input, col_info = st.columns([1, 2])
     with col_input:
