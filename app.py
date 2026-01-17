@@ -123,22 +123,51 @@ with tabs[0]:
         st.error("行情數據讀取失敗。")
 
 # --- Tab 2: 強勢掃描 ---
+# --- Tab 2: 強勢掃描 (靈敏度可調版) ---
 with tabs[1]:
-    st.subheader("📡 全市場強勢爆量雷達")
-    if st.button("啟動雷達掃描", key="btn_t2"):
-        with st.spinner("正在搜尋最近交易日..."):
+    st.subheader("📡 全市場強勢股雷達")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        min_gain = st.slider("📈 最低漲幅門檻 (%)", 1.0, 7.0, 3.0, step=0.5)
+    with col2:
+        min_vol = st.number_input("📊 最低成交量 (張)", 500, 10000, 1500, step=500)
+
+    if st.button("立即掃描全市場", key="btn_scan_v2"):
+        with st.spinner("正在搜尋近期盤面強勢股..."):
             found = False
+            # 搜尋最近 10 天，找到最近一個交易日
             for i in range(10):
                 d = (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')
                 all_p = safe_get_data("TaiwanStockPrice", start_date=d)
-                if not all_p.empty and len(all_p) > 100:
-                    res = all_p[(all_p['close'] > all_p['open']*1.04) & (all_p['volume'] >= 3000000)].copy()
+                
+                if not all_p.empty and len(all_p) > 500:
+                    # 邏輯強化：加入漲幅計算
+                    # 條件：(收盤 > 開盤 * 門檻) 且 (成交量 > 門檻 * 1000 因為 API 是以股為單位)
+                    res = all_p[
+                        (all_p['close'] >= all_p['open'] * (1 + min_gain/100)) & 
+                        (all_p['volume'] >= min_vol * 1000)
+                    ].copy()
+                    
                     if not res.empty:
+                        # 串接股名
                         res = res.merge(master_info[['stock_id', 'stock_name']], on='stock_id', how='left')
-                        st.success(f"✅ 發現日期：{d}")
-                        st.dataframe(res[['stock_id', 'stock_name', 'close', 'volume']].sort_values('volume', ascending=False))
-                        found = True; break
-            if not found: st.info("近期無符合條件標的。")
+                        # 計算實際漲幅
+                        res['漲幅%'] = ((res['close'] - res['open']) / res['open'] * 100).round(2)
+                        
+                        st.success(f"✅ 掃描完成！基準日期：{d}")
+                        st.dataframe(
+                            res[['stock_id', 'stock_name', 'close', '漲幅%', 'volume']]
+                            .sort_values('漲幅%', ascending=False)
+                            .rename(columns={'stock_id': '代號', 'stock_name': '名稱', 'close': '收盤', 'volume': '成交量'}),
+                            hide_index=True,
+                            use_container_width=True
+                        )
+                        found = True
+                        break
+            
+            if not found:
+                st.warning("查無符合條件標的，建議降低『最低漲幅』或『成交量』門檻再試一次。")
 
 # --- Tab 3: VIP 鎖碼雷達 (穩定度終極強化) ---
 with tabs[2]:
