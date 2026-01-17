@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="台股量價決策系統", layout="wide")
 
 # 【請填入你的 Token】
-FINMIND_TOKEN =fullgo
+FINMIND_TOKEN ="fullgo"
 @st.cache_resource
 def init_dl():
     loader = DataLoader()
