@@ -20,30 +20,45 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 官方個股名單 ---
+# --- 2. 官方名單抓取 (上市 + 上櫃) ---
 @st.cache_data(ttl=86400)
-def get_official_stock_list():
-    url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=20, verify=False)
-        res.encoding = 'big5'
-        df = pd.read_html(res.text)[0]
-        df.columns = df.iloc[0]
-        df = df.iloc[1:]
-        def split_id_name(val):
-            parts = str(val).split('\u3000') 
-            if len(parts) >= 2 and len(parts[0]) == 4 and parts[0].isdigit():
-                return parts[0], parts[1]
-            return None, None
-        df[['sid', 'sname']] = df.iloc[:, 0].apply(lambda x: pd.Series(split_id_name(x)))
-        clean_df = df.dropna(subset=['sid'])[['sid', 'sname']].copy()
-        clean_df['display'] = clean_df['sid'] + " " + clean_df['sname']
-        return clean_df.sort_values('sid').reset_index(drop=True)
-    except:
-        return pd.DataFrame([{"sid":"2330","sname":"台積電","display":"2330 台積電"}])
+def get_full_stock_list():
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    def split_id_name(val):
+        parts = str(val).split('\u3000') 
+        if len(parts) >= 2 and len(parts[0]) == 4 and parts[0].isdigit():
+            return parts[0], parts[1]
+        return None, None
 
-master_df = get_official_stock_list()
+    # 抓取上市名單
+    try:
+        res_tse = requests.get("https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", headers=headers, verify=False)
+        res_tse.encoding = 'big5'
+        df_tse = pd.read_html(res_tse.text)[0]
+        df_tse.columns = df_tse.iloc[0]
+        df_tse = df_tse.iloc[1:]
+        df_tse[['sid', 'sname']] = df_tse.iloc[:, 0].apply(lambda x: pd.Series(split_id_name(x)))
+    except:
+        df_tse = pd.DataFrame(columns=['sid', 'sname'])
+
+    # 抓取上櫃名單
+    try:
+        res_otc = requests.get("https://isin.twse.com.tw/isin/C_public.jsp?strMode=4", headers=headers, verify=False)
+        res_otc.encoding = 'big5'
+        df_otc = pd.read_html(res_otc.text)[0]
+        df_otc.columns = df_otc.iloc[0]
+        df_otc = df_otc.iloc[1:]
+        df_otc[['sid', 'sname']] = df_otc.iloc[:, 0].apply(lambda x: pd.Series(split_id_name(x)))
+    except:
+        df_otc = pd.DataFrame(columns=['sid', 'sname'])
+
+    # 合併並去重
+    full_df = pd.concat([df_tse, df_otc]).dropna(subset=['sid'])
+    full_df = full_df[['sid', 'sname']].drop_duplicates().sort_values('sid')
+    full_df['display'] = full_df['sid'] + " " + full_df['sname']
+    return full_df.reset_index(drop=True)
+
+master_df = get_full_stock_list()
 display_list = master_df['display'].tolist()
 id_map = master_df.set_index('display')['sid'].to_dict()
 
@@ -61,7 +76,6 @@ def fetch_comprehensive_data(sid):
     dl = get_loader()
     start_dt = (datetime.now() - timedelta(days=450)).strftime('%Y-%m-%d')
     try:
-        # A. 抓取價格數據
         price = dl.get_data(dataset="TaiwanStockPrice", data_id=sid, start_date=start_dt)
         if price is None or price.empty: return pd.DataFrame()
         price.columns = [c.lower() for c in price.columns]
@@ -69,20 +83,22 @@ def fetch_comprehensive_data(sid):
         price['date'] = pd.to_datetime(price['date'])
         df = price.sort_values('date')
         
-        # B. 技術指標計算
+        # 指標計算
         df['ma5'] = df['close'].rolling(5).mean()
         df['ma10'] = df['close'].rolling(10).mean()
         df['ma20'] = df['close'].rolling(20).mean()
         df['std20'] = df['close'].rolling(20).std()
         df['upper'] = df['ma20'] + (df['std20'] * 2)
         df['lower'] = df['ma20'] - (df['std20'] * 2)
+        
+        # MACD
         df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
         df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
         df['dif'] = df['ema12'] - df['ema26']
         df['dea'] = df['dif'].ewm(span=9, adjust=False).mean()
         df['macd_hist'] = df['dif'] - df['dea']
         
-        # C. 三大法人數據抓取 (整合)
+        # 三大法人
         try:
             inst = dl.get_data(dataset="InstitutionalInvestorsBuySell", data_id=sid, start_date=start_dt)
             if not inst.empty:
@@ -103,7 +119,7 @@ with st.sidebar:
     st.selectbox("🔍 搜尋標的", options=display_list, 
                  index=display_list.index(next(s for s in display_list if st.session_state.active_sid in s)), 
                  key="stock_selector_key", on_change=sync_selection)
-    st.caption(f"已同步：{len(display_list)} 檔個股")
+    st.caption(f"已同步上市櫃個股：{len(display_list)} 檔")
 
 df = fetch_comprehensive_data(st.session_state.active_sid)
 
@@ -117,7 +133,7 @@ if not df.empty:
         subplot_titles=("K線 / 均線 / 布林通道", "MACD 趨勢指標", "三大法人買賣超 (張)", "成交量")
     )
 
-    # 1. 主圖表
+    # 1. 主圖
     fig.add_trace(go.Candlestick(x=d_str, open=pdf['open'], high=pdf['high'], low=pdf['low'], close=pdf['close'], 
                                 increasing_line_color='#FF0000', increasing_fillcolor='#FF0000',
                                 decreasing_line_color='#00FF00', decreasing_fillcolor='#00FF00', name="K線"), row=1, col=1)
@@ -129,13 +145,13 @@ if not df.empty:
 
     # 2. MACD
     m_colors = ['#FF0000' if x > 0 else '#00FF00' for x in pdf['macd_hist']]
-    fig.add_trace(go.Bar(x=d_str, y=pdf['macd_hist'], marker_color=m_colors, name="MACD柱"), row=2, col=1)
+    fig.add_trace(go.Bar(x=d_str, y=pdf['macd_hist'], marker_color=m_colors, name="MACD"), row=2, col=1)
     fig.add_trace(go.Scatter(x=d_str, y=pdf['dif'], line=dict(color='#FFFF00', width=1.5), name="DIF"), row=2, col=1)
     fig.add_trace(go.Scatter(x=d_str, y=pdf['dea'], line=dict(color='#FFA500', width=1.5), name="DEA"), row=2, col=1)
 
-    # 3. 三大法人 (買紅賣綠)
+    # 3. 三大法人
     i_colors = ['#FF0000' if x > 0 else '#00FF00' for x in pdf['buy_sell']]
-    fig.add_trace(go.Bar(x=d_str, y=pdf['buy_sell'], marker_color=i_colors, name="法人買賣"), row=3, col=1)
+    fig.add_trace(go.Bar(x=d_str, y=pdf['buy_sell'], marker_color=i_colors, name="法人"), row=3, col=1)
 
     # 4. 成交量
     v_colors = ['#FF0000' if pdf['close'].iloc[i] >= pdf['open'].iloc[i] else '#00FF00' for i in range(len(pdf))]
@@ -144,6 +160,5 @@ if not df.empty:
     fig.update_layout(height=950, template="plotly_dark", paper_bgcolor='#000000', plot_bgcolor='#000000', 
                       showlegend=False, xaxis_rangeslider_visible=False, margin=dict(t=50, b=20, l=10, r=10))
     st.plotly_chart(fig, use_container_width=True)
-
 else:
-    st.info("📊 數據載入中，請確保代號輸入正確...")
+    st.info("📊 數據讀取中或該股今日停牌...")
