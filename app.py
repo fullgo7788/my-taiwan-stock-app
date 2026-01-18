@@ -11,16 +11,17 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="AlphaRadar | Pro", layout="wide")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 強制極黑背景 CSS
+# 強制極黑背景 CSS 優化
 st.markdown("""
     <style>
     .stApp { background-color: #000000; }
     [data-testid="stSidebar"] { background-color: #111111; }
+    .stSelectbox label { color: #00FFFF !important; font-weight: bold; }
     h1, h2, h3, p, span { color: #E0E0E0 !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 官方名單抓取 (上市 + 上櫃) ---
+# --- 2. 官方名單抓取 (上市 + 上櫃整合) ---
 @st.cache_data(ttl=86400)
 def get_full_stock_list():
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -30,31 +31,24 @@ def get_full_stock_list():
             return parts[0], parts[1]
         return None, None
 
-    # 抓取上市名單
-    try:
-        res_tse = requests.get("https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", headers=headers, verify=False)
-        res_tse.encoding = 'big5'
-        df_tse = pd.read_html(res_tse.text)[0]
-        df_tse.columns = df_tse.iloc[0]
-        df_tse = df_tse.iloc[1:]
-        df_tse[['sid', 'sname']] = df_tse.iloc[:, 0].apply(lambda x: pd.Series(split_id_name(x)))
-    except:
-        df_tse = pd.DataFrame(columns=['sid', 'sname'])
-
-    # 抓取上櫃名單
-    try:
-        res_otc = requests.get("https://isin.twse.com.tw/isin/C_public.jsp?strMode=4", headers=headers, verify=False)
-        res_otc.encoding = 'big5'
-        df_otc = pd.read_html(res_otc.text)[0]
-        df_otc.columns = df_otc.iloc[0]
-        df_otc = df_otc.iloc[1:]
-        df_otc[['sid', 'sname']] = df_otc.iloc[:, 0].apply(lambda x: pd.Series(split_id_name(x)))
-    except:
-        df_otc = pd.DataFrame(columns=['sid', 'sname'])
-
-    # 合併並去重
-    full_df = pd.concat([df_tse, df_otc]).dropna(subset=['sid'])
-    full_df = full_df[['sid', 'sname']].drop_duplicates().sort_values('sid')
+    # 上市 & 上櫃
+    urls = [
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2",
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
+    ]
+    all_dfs = []
+    for url in urls:
+        try:
+            res = requests.get(url, headers=headers, verify=False)
+            res.encoding = 'big5'
+            df = pd.read_html(res.text)[0]
+            df.columns = df.iloc[0]
+            df = df.iloc[1:]
+            df[['sid', 'sname']] = df.iloc[:, 0].apply(lambda x: pd.Series(split_id_name(x)))
+            all_dfs.append(df.dropna(subset=['sid'])[['sid', 'sname']])
+        except: continue
+    
+    full_df = pd.concat(all_dfs).drop_duplicates().sort_values('sid')
     full_df['display'] = full_df['sid'] + " " + full_df['sname']
     return full_df.reset_index(drop=True)
 
@@ -72,10 +66,11 @@ def sync_selection():
 @st.cache_resource
 def get_loader(): return DataLoader()
 
-def fetch_comprehensive_data(sid):
+def fetch_data(sid):
     dl = get_loader()
-    start_dt = (datetime.now() - timedelta(days=450)).strftime('%Y-%m-%d')
+    start_dt = (datetime.now() - timedelta(days=400)).strftime('%Y-%m-%d')
     try:
+        # 價格與技術指標
         price = dl.get_data(dataset="TaiwanStockPrice", data_id=sid, start_date=start_dt)
         if price is None or price.empty: return pd.DataFrame()
         price.columns = [c.lower() for c in price.columns]
@@ -83,48 +78,48 @@ def fetch_comprehensive_data(sid):
         price['date'] = pd.to_datetime(price['date'])
         df = price.sort_values('date')
         
-        # 指標計算
+        # MA & BBands
         df['ma5'] = df['close'].rolling(5).mean()
         df['ma10'] = df['close'].rolling(10).mean()
         df['ma20'] = df['close'].rolling(20).mean()
-        df['std20'] = df['close'].rolling(20).std()
-        df['upper'] = df['ma20'] + (df['std20'] * 2)
-        df['lower'] = df['ma20'] - (df['std20'] * 2)
+        df['std'] = df['close'].rolling(20).std()
+        df['upper'] = df['ma20'] + (df['std'] * 2)
+        df['lower'] = df['ma20'] - (df['std'] * 2)
         
         # MACD
-        df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
-        df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
+        df['ema12'] = df['close'].ewm(span=12).mean()
+        df['ema26'] = df['close'].ewm(span=26).mean()
         df['dif'] = df['ema12'] - df['ema26']
-        df['dea'] = df['dif'].ewm(span=9, adjust=False).mean()
+        df['dea'] = df['dif'].ewm(span=9).mean()
         df['macd_hist'] = df['dif'] - df['dea']
         
-        # 三大法人
+        # 三大法人詳細數據
         try:
             inst = dl.get_data(dataset="InstitutionalInvestorsBuySell", data_id=sid, start_date=start_dt)
             if not inst.empty:
-                inst_sum = inst.groupby('date')['buy_sell'].sum().reset_index()
-                inst_sum['date'] = pd.to_datetime(inst_sum['date'])
-                df = df.merge(inst_sum, on='date', how='left').fillna(0)
-            else:
-                df['buy_sell'] = 0
-        except:
-            df['buy_sell'] = 0
+                pivot = inst.pivot_table(index='date', columns='name', values='buy_sell', aggfunc='sum').fillna(0)
+                pivot.index = pd.to_datetime(pivot.index)
+                df = df.merge(pivot, left_on='date', right_index=True, how='left').fillna(0)
+                df['total_inst'] = df.get('Foreign_Investor', 0) + df.get('Investment_Trust', 0) + df.get('Dealer', 0)
+            else: df['total_inst'] = 0
+        except: df['total_inst'] = 0
         return df
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
-# --- 4. UI 介面 ---
+# --- 4. 側邊欄 ---
 with st.sidebar:
     st.title("阿爾法雷達")
     st.selectbox("🔍 搜尋標的", options=display_list, 
                  index=display_list.index(next(s for s in display_list if st.session_state.active_sid in s)), 
                  key="stock_selector_key", on_change=sync_selection)
-    st.caption(f"已同步上市櫃個股：{len(display_list)} 檔")
+    st.divider()
+    st.info(f"已同步個股：{len(display_list)} 檔")
 
-df = fetch_comprehensive_data(st.session_state.active_sid)
+# --- 5. 主圖表繪製 ---
+df = fetch_data(st.session_state.active_sid)
 
 if not df.empty:
-    pdf = df.tail(100)
+    pdf = df.tail(120)
     d_str = pdf['date'].dt.strftime('%Y-%m-%d').tolist()
 
     fig = make_subplots(
@@ -133,32 +128,34 @@ if not df.empty:
         subplot_titles=("K線 / 均線 / 布林通道", "MACD 趨勢指標", "三大法人買賣超 (張)", "成交量")
     )
 
-    # 1. 主圖
+    # 主圖 (K線 + 均線 + 布林)
     fig.add_trace(go.Candlestick(x=d_str, open=pdf['open'], high=pdf['high'], low=pdf['low'], close=pdf['close'], 
                                 increasing_line_color='#FF0000', increasing_fillcolor='#FF0000',
                                 decreasing_line_color='#00FF00', decreasing_fillcolor='#00FF00', name="K線"), row=1, col=1)
     fig.add_trace(go.Scatter(x=d_str, y=pdf['ma5'], line=dict(color='#FFFFFF', width=1), name="5MA"), row=1, col=1)
     fig.add_trace(go.Scatter(x=d_str, y=pdf['ma10'], line=dict(color='#FFFF00', width=1), name="10MA"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=d_str, y=pdf['ma20'], line=dict(color='#FF00FF', width=1), name="20MA"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=d_str, y=pdf['upper'], line=dict(color='#00FFFF', width=1, dash='dot'), name="上軌"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=d_str, y=pdf['lower'], line=dict(color='#00FFFF', width=1, dash='dot'), name="下軌"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=d_str, y=pdf['ma20'], line=dict(color='#FF00FF', width=1.5), name="20MA"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=d_str, y=pdf['upper'], line=dict(color='#00FFFF', width=1.2, dash='dot'), name="上軌"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=d_str, y=pdf['lower'], line=dict(color='#00FFFF', width=1.2, dash='dot'), name="下軌"), row=1, col=1)
 
-    # 2. MACD
+    # MACD
     m_colors = ['#FF0000' if x > 0 else '#00FF00' for x in pdf['macd_hist']]
     fig.add_trace(go.Bar(x=d_str, y=pdf['macd_hist'], marker_color=m_colors, name="MACD"), row=2, col=1)
     fig.add_trace(go.Scatter(x=d_str, y=pdf['dif'], line=dict(color='#FFFF00', width=1.5), name="DIF"), row=2, col=1)
     fig.add_trace(go.Scatter(x=d_str, y=pdf['dea'], line=dict(color='#FFA500', width=1.5), name="DEA"), row=2, col=1)
 
-    # 3. 三大法人
-    i_colors = ['#FF0000' if x > 0 else '#00FF00' for x in pdf['buy_sell']]
-    fig.add_trace(go.Bar(x=d_str, y=pdf['buy_sell'], marker_color=i_colors, name="法人"), row=3, col=1)
+    # 三大法人 (買紅賣綠柱狀圖)
+    inst_colors = ['#FF0000' if x > 0 else '#00FF00' for x in pdf['total_inst']]
+    fig.add_trace(go.Bar(x=d_str, y=pdf['total_inst'], marker_color=inst_colors, name="法人總合"), row=3, col=1)
 
-    # 4. 成交量
+    # 成交量
     v_colors = ['#FF0000' if pdf['close'].iloc[i] >= pdf['open'].iloc[i] else '#00FF00' for i in range(len(pdf))]
     fig.add_trace(go.Bar(x=d_str, y=pdf['volume'], marker_color=v_colors, name="成交量"), row=4, col=1)
 
     fig.update_layout(height=950, template="plotly_dark", paper_bgcolor='#000000', plot_bgcolor='#000000', 
-                      showlegend=False, xaxis_rangeslider_visible=False, margin=dict(t=50, b=20, l=10, r=10))
+                      showlegend=False, xaxis_rangeslider_visible=False, margin=dict(t=50, b=20, l=10, r=10),
+                      xaxis4=dict(type='category')) # 避免日期斷層
     st.plotly_chart(fig, use_container_width=True)
+
 else:
-    st.info("📊 數據讀取中或該股今日停牌...")
+    st.warning("📊 數據更新中，請稍候再試或更換個股代號。")
