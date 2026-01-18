@@ -7,10 +7,11 @@ from datetime import datetime, timedelta
 import time
 
 # --- 1. 系統初始化 ---
-st.set_page_config(page_title="AlphaRadar 專業版", layout="wide")
+st.set_page_config(page_title="AlphaRadar", layout="wide")
 
-if 'current_sid' not in st.session_state: 
-    st.session_state.current_sid = "2330"
+# 確保 Session State 初始化，預設 2330
+if 'active_sid' not in st.session_state:
+    st.session_state.active_sid = "2330"
 
 FINMIND_TOKEN = "fullgo" 
 
@@ -22,106 +23,145 @@ def get_loader():
 
 dl = get_loader()
 
-# --- 2. 數據引擎 (強化防錯) ---
+# --- 2. 數據抓取與清洗 ---
 def safe_fetch(dataset, data_id=None, start_date=None):
     try:
-        time.sleep(0.4)
+        time.sleep(0.3)
         df = dl.get_data(dataset=dataset, data_id=data_id, start_date=start_date)
         if df is not None and not df.empty:
-            df.columns = [col.lower() for col in df.columns] 
+            df.columns = [col.lower() for col in df.columns]
+            # 轉換數值
+            numeric_cols = ['close', 'open', 'high', 'low', 'volume']
+            for col in df.columns:
+                if any(k in col for k in numeric_cols):
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
             if 'date' in df.columns:
                 df['date'] = pd.to_datetime(df['date'], errors='coerce')
-                df = df.dropna(subset=['date'])
+                df = df.dropna(subset=['date', 'open', 'high', 'low', 'close'])
             df = df.rename(columns={'trading_volume': 'volume', 'max': 'high', 'min': 'low'})
             return df
-    except:
-        pass
+    except: pass
     return pd.DataFrame()
 
-# --- 3. 索引引擎 (全市場選單) ---
+# --- 3. 索引過濾：取消資本額限制，回歸全市場標的 ---
 @st.cache_data(ttl=86400)
-def get_universe():
-    df = safe_fetch("TaiwanStockInfo")
-    if df.empty or 'stock_id' not in df.columns:
+def get_all_market_universe():
+    info_df = safe_fetch("TaiwanStockInfo")
+    if info_df.empty:
         return pd.DataFrame([{"stock_id": "2330", "stock_name": "台積電", "display": "2330 台積電"}])
-    df = df[df['stock_id'].str.match(r'^\d{4}$', na=False)]
-    df['display'] = df['stock_id'].astype(str) + " " + df['stock_name'].astype(str)
+    
+    # 僅篩選標準 4 位數代碼個股，不限資本額以保持穩定
+    df = info_df[info_df['stock_id'].str.match(r'^\d{4}$', na=False)].copy()
+    df['display'] = df['stock_id'] + " " + df['stock_name']
     return df.sort_values('stock_id').reset_index(drop=True)
 
-master_df = get_universe()
+master_df = get_all_market_universe()
+options = master_df['display'].tolist()
+display_to_id = master_df.set_index('display')['stock_id'].to_dict()
 
-# --- 4. 側邊欄控制 ---
+# --- 4. 側邊欄：下拉選單邏輯 ---
+def on_stock_change():
+    # 當選單切換時，直接更新 Session State
+    st.session_state.active_sid = display_to_id[st.session_state.stock_selector]
+
 with st.sidebar:
-    st.header("⚡ 系統控制台")
-    options = master_df['display'].tolist()
-    display_to_id = master_df.set_index('display')['stock_id'].to_dict()
+    st.header("⚡ 策略選單")
     
     try:
-        current_display = master_df[master_df['stock_id'] == st.session_state.current_sid]['display'].values[0]
-        curr_idx = options.index(current_display)
+        curr_name = master_df[master_df['stock_id'] == st.session_state.active_sid]['display'].values[0]
+        curr_idx = options.index(curr_name)
     except:
-        curr_idx = 0
+        curr_idx = options.index("2330 台積電") if "2330 台積電" in options else 0
 
-    selected_tag = st.selectbox("🔍 選擇個股", options=options, index=curr_idx)
-    target_sid = display_to_id[selected_tag]
-    if target_sid != st.session_state.current_sid:
-        st.session_state.current_sid = target_sid
-        st.rerun()
+    st.selectbox(
+        "🔍 全市場標的選擇",
+        options=options,
+        index=curr_idx,
+        key="stock_selector",
+        on_change=on_stock_change
+    )
 
-# --- 5. 主分頁區 (僅保留兩項) ---
-tabs = st.tabs(["📊 技術診斷", "🐳 籌碼趨勢"])
+# --- 5. 主分頁區 ---
+tabs = st.tabs(["📊 技術分析", "🎯 大戶發動名單"])
 
-# --- TAB 1: 技術診斷 (全均線) ---
+# --- TAB 1: 技術分析 (移除上方個股標籤，保留均線說明) ---
 with tabs[0]:
-    sid = st.session_state.current_sid
-    st.subheader(f"📈 {selected_tag} 技術分析")
+    current_sid = st.session_state.active_sid
+    # 抓取 360 天數據確保指標穩定
+    df_raw = safe_fetch("TaiwanStockPrice", current_sid, (datetime.now()-timedelta(days=360)).strftime('%Y-%m-%d'))
     
-    # 抓取較長數據以計算 MA60
-    df_price = safe_fetch("TaiwanStockPrice", sid, (datetime.now()-timedelta(days=260)).strftime('%Y-%m-%d'))
-    
-    if not df_price.empty:
-        df = df_price.sort_values('date')
+    if not df_raw.empty and len(df_raw) >= 60:
+        df = df_raw.sort_values('date').copy()
         df['ma5'] = df['close'].rolling(5).mean()
-        df['ma10'] = df['close'].rolling(10).mean()
         df['ma20'] = df['close'].rolling(20).mean()
         df['ma60'] = df['close'].rolling(60).mean()
         
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-        fig.add_trace(go.Candlestick(x=df['date'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="K線"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df['date'], y=df['ma5'], name="5MA", line=dict(color='white', width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df['date'], y=df['ma10'], name="10MA", line=dict(color='yellow', width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df['date'], y=df['ma20'], name="20MA", line=dict(color='magenta', width=1.2)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df['date'], y=df['ma60'], name="60MA", line=dict(color='cyan', width=1.5)), row=1, col=1)
-        fig.add_trace(go.Bar(x=df['date'], y=df['volume'], name="量", marker_color='gray', opacity=0.5), row=2, col=1)
-        fig.update_layout(height=650, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(t=10, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-
-
-# --- TAB 2: 籌碼趨勢 (強化解析邏輯) ---
-with tabs[1]:
-    sid = st.session_state.current_sid
-    st.subheader(f"🐳 {sid} 千張大戶持股趨勢")
-    
-    chip_df = safe_fetch("TaiwanStockShareholding", sid, (datetime.now()-timedelta(days=200)).strftime('%Y-%m-%d'))
-    
-    if not chip_df.empty:
-        # 動態偵測欄位
-        lvl_col = next((c for c in chip_df.columns if any(k in c for k in ['level', 'class', 'stage', '分級'])), None)
-        pct_col = next((c for c in chip_df.columns if any(k in c for k in ['percent', 'ratio', '比例'])), None)
+        # 過濾掉均線計算初期的空值
+        plot_df = df.dropna(subset=['ma20']).copy()
         
-        if not lvl_col or not pct_col:
-            lvl_col = chip_df.columns[-2]
-            pct_col = chip_df.columns[-1]
-
-        # 模糊篩選千張大戶等級
-        mask = chip_df[lvl_col].astype(str).str.contains('1000|15|大於1000', na=False)
-        big = chip_df[mask].sort_values('date')
-        
-        if not big.empty:
-            plot_data = big.set_index('date')[[pct_col]]
-            st.line_chart(plot_data)
+        if not plot_df.empty:
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
+            
+            # K線圖：漲紅跌綠
+            fig.add_trace(go.Candlestick(
+                x=plot_df['date'], open=plot_df['open'], high=plot_df['high'], low=plot_df['low'], close=plot_df['close'],
+                increasing_line_color='#FF3232', increasing_fill_color='#FF3232',
+                decreasing_line_color='#00AA00', decreasing_fill_color='#00AA00'
+            ), row=1, col=1)
+            
+            # 均線：白(5)、黃(20)、青(60)
+            fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma5'], line=dict(color='white', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma20'], line=dict(color='#FFD700', width=2.5)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=plot_df['date'], y=plot_df['ma60'], line=dict(color='#00FFFF', width=1.5)), row=1, col=1)
+            
+            # 成交量
+            fig.add_trace(go.Bar(x=plot_df['date'], y=plot_df['volume'], marker_color='gray', opacity=0.4), row=2, col=1)
+            
+            fig.update_layout(
+                height=700, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False,
+                margin=dict(t=30, b=10, l=10, r=10),
+                annotations=[dict(x=0.01, y=1.05, xref="paper", yref="paper", 
+                                 text="● 5MA (白)  ● 20MA (黃)  ● 60MA (青)", 
+                                 showarrow=False, font=dict(color="white", size=14))]
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
         else:
-            st.info("無法過濾出大戶分級資料，顯示原始數據首 5 筆：")
-            st.write(chip_df.head(5))
+            st.warning("數據清理後不足以繪圖。")
     else:
-        st.info("暫無籌碼數據。")
+        st.info("無法獲取足夠的歷史交易數據。")
+
+# --- TAB 2: 名單比對 ---
+with tabs[1]:
+    st.subheader("🎯 大戶籌碼與均線發動名單")
+    if st.button("🚀 執行策略掃描"):
+        with st.spinner("掃描市場中..."):
+            hit_list = []
+            # 為確保效能，掃描前 100 檔標的
+            for s in master_df['stock_id'].tolist()[:100]:
+                c_df = safe_fetch("TaiwanStockShareholding", s, (datetime.now()-timedelta(days=21)).strftime('%Y-%m-%d'))
+                p_df = safe_fetch("TaiwanStockPrice", s, (datetime.now()-timedelta(days=40)).strftime('%Y-%m-%d'))
+                
+                if not c_df.empty and len(p_df) > 20:
+                    pct_col = next((c for c in c_df.columns if 'percent' in c or 'ratio' in c), None)
+                    lvl_col = next((c for c in c_df.columns if 'level' in c or 'stage' in c), None)
+                    
+                    if pct_col and lvl_col:
+                        big = c_df[c_df[lvl_col].astype(str).str.contains('1000|15')].sort_values('date')
+                        if len(big) >= 2:
+                            diff = float(big.iloc[-1][pct_col]) - float(big.iloc[-2][pct_col])
+                            p_df['ma20'] = p_df['close'].rolling(20).mean()
+                            latest = p_df.iloc[-1]
+                            
+                            if diff > 0 and latest['close'] > latest['ma20']:
+                                s_name = master_df[master_df['stock_id']==s]['stock_name'].values[0]
+                                hit_list.append({
+                                    "代號": s, "名稱": s_name, 
+                                    "大戶持股增減": f"{diff:+.2f}%",
+                                    "收盤價": latest['close'],
+                                    "趨勢": "📈 籌碼正向"
+                                })
+            if hit_list:
+                st.table(pd.DataFrame(hit_list))
+            else:
+                st.info("當前樣本中暫無符合標的。")
