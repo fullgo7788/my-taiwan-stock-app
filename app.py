@@ -2,17 +2,17 @@ import streamlit as st
 from FinMind.data import DataLoader
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import time
 
 # --- 1. 系統初始化 ---
-st.set_page_config(page_title="AlphaRadar 專業終端", layout="wide")
+st.set_page_config(page_title="AlphaRadar 專業版", layout="wide")
 
-if 'current_sid' not in st.session_state: st.session_state.current_sid = "2330"
-if 'is_vip' not in st.session_state: st.session_state.is_vip = False
+if 'current_sid' not in st.session_state: 
+    st.session_state.current_sid = "2330"
 
 FINMIND_TOKEN = "fullgo" 
-VIP_KEY = "ST888" 
 
 @st.cache_resource
 def get_loader():
@@ -22,37 +22,33 @@ def get_loader():
 
 dl = get_loader()
 
-# --- 2. 強化版數據引擎 (解決 None 導致的報錯) ---
+# --- 2. 數據引擎 (強化防錯與日期轉換) ---
 def safe_fetch(dataset, data_id=None, start_date=None):
     try:
-        time.sleep(0.4)
+        time.sleep(0.4) # 防止 API 過快被鎖
         df = dl.get_data(dataset=dataset, data_id=data_id, start_date=start_date)
         if df is not None and not df.empty:
             df.columns = [col.lower() for col in df.columns]
             
-            # 關鍵修復：處理日期中的 None 值
+            # 解決「None 時間資料」報錯
             if 'date' in df.columns:
-                # 使用 errors='coerce' 將無效日期轉為 NaT，再刪除空值
                 df['date'] = pd.to_datetime(df['date'], errors='coerce')
                 df = df.dropna(subset=['date'])
             
-            # 統一欄位名稱
             df = df.rename(columns={'trading_volume': 'volume', 'max': 'high', 'min': 'low'})
             return df
-    except Exception as e:
-        # 靜默錯誤，不影響 UI
+    except:
         pass
     return pd.DataFrame()
 
-# --- 3. 索引引擎 (保底機制) ---
+# --- 3. 索引引擎 (全市場個股) ---
 @st.cache_data(ttl=86400)
 def get_universe():
     df = safe_fetch("TaiwanStockInfo")
-    # 如果抓取失敗或格式錯誤，提供保底選單
     if df.empty or 'stock_id' not in df.columns:
         return pd.DataFrame([{"stock_id": "2330", "stock_name": "台積電", "display": "2330 台積電"}])
     
-    # 過濾標準個股並確保無空值
+    # 確保包含所有 4 位數代碼的上市櫃個股
     df = df[df['stock_id'].str.match(r'^\d{4}$', na=False)]
     df['display'] = df['stock_id'].astype(str) + " " + df['stock_name'].astype(str)
     return df.sort_values('stock_id').reset_index(drop=True)
@@ -61,7 +57,7 @@ master_df = get_universe()
 
 # --- 4. 側邊欄控制 ---
 with st.sidebar:
-    st.header("⚡ 策略控制台")
+    st.header("⚡ 系統控制台")
     
     options = master_df['display'].tolist()
     display_to_id = master_df.set_index('display')['stock_id'].to_dict()
@@ -72,55 +68,78 @@ with st.sidebar:
     except:
         curr_idx = 0
 
-    selected_tag = st.selectbox("🔍 全市場個股搜尋", options=options, index=curr_idx)
+    selected_tag = st.selectbox("🔍 搜尋全市場個股", options=options, index=curr_idx)
     
-    # 連動邏輯
     target_sid = display_to_id[selected_tag]
     if target_sid != st.session_state.current_sid:
         st.session_state.current_sid = target_sid
-        st.rerun() 
-    
-    st.divider()
-    pw = st.text_input("💎 VIP 授權碼", type="password")
-    if pw == VIP_KEY:
-        st.session_state.is_vip = True
-    elif pw != "":
-        st.sidebar.error("密碼不正確")
+        st.rerun()
 
 # --- 5. 主分頁區 ---
-tabs = st.tabs(["📊 技術診斷", "📡 強勢掃描", "🐳 籌碼動向", "💎 專業策略"])
+tabs = st.tabs(["📊 技術診斷 (全均線)", "📡 市場強勢掃描", "🐳 籌碼動向"])
 
-# TAB 1: 技術 (確保圖表不因日期報錯)
+# --- TAB 1: 技術診斷 (均線參數全顯示) ---
 with tabs[0]:
     sid = st.session_state.current_sid
-    st.subheader(f"📈 {sid} 技術走勢")
-    df_price = safe_fetch("TaiwanStockPrice", sid, (datetime.now()-timedelta(days=150)).strftime('%Y-%m-%d'))
+    st.subheader(f"📈 {selected_tag} 技術分析")
+    
+    # 抓取較長數據以計算 MA60
+    df_price = safe_fetch("TaiwanStockPrice", sid, (datetime.now()-timedelta(days=260)).strftime('%Y-%m-%d'))
     
     if not df_price.empty:
-        fig = go.Figure(data=[go.Candlestick(
-            x=df_price['date'],
-            open=df_price['open'], high=df_price['high'],
-            low=df_price['low'], close=df_price['close']
-        )])
-        fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True, key=f"kline_{sid}")
+        df = df_price.sort_values('date')
+        # 計算均線
+        df['ma5'] = df['close'].rolling(5).mean()
+        df['ma10'] = df['close'].rolling(10).mean()
+        df['ma20'] = df['close'].rolling(20).mean()
+        df['ma60'] = df['close'].rolling(60).mean()
         
+        # 繪圖
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+        
+        # K線
+        fig.add_trace(go.Candlestick(x=df['date'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="K線"), row=1, col=1)
+        
+        # 均線群
+        fig.add_trace(go.Scatter(x=df['date'], y=df['ma5'], name="5MA", line=dict(color='white', width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['date'], y=df['ma10'], name="10MA", line=dict(color='yellow', width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['date'], y=df['ma20'], name="20MA (月)", line=dict(color='magenta', width=1.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['date'], y=df['ma60'], name="60MA (季)", line=dict(color='cyan', width=1.5)), row=1, col=1)
+        
+        # 成交量
+        fig.add_trace(go.Bar(x=df['date'], y=df['volume'], name="成交量", marker_color='gray', opacity=0.5), row=2, col=1)
+        
+        fig.update_layout(height=650, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True, key=f"kline_{sid}")
     else:
-        st.info("暫無即時數據，請稍後重試。")
+        st.info("數據獲取中，請稍候。")
 
-# TAB 2: 強勢掃描
+# --- TAB 2: 市場強勢掃描 ---
 with tabs[1]:
-    st.subheader("📡 全市場漲勢掃描 (近 3 交易日)")
-    vol_filter = st.number_input("最低成交量門檻 (張)", 300, 10000, 1000)
+    st.subheader("📡 全市場漲勢篩選 (近 3 交易日)")
+    vol_min = st.number_input("最低成交量門檻 (張)", 300, 10000, 1000)
     if st.button("🚀 執行掃描"):
-        with st.spinner("掃描中..."):
-            all_market = safe_fetch("TaiwanStockPrice", start_date=(datetime.now()-timedelta(days=5)).strftime('%Y-%m-%d'))
-            if not all_market.empty:
-                latest_dt = all_market['date'].max()
-                res = all_market[all_market['date'] == latest_dt].copy()
+        with st.spinner("正在分析市場數據..."):
+            all_m = safe_fetch("TaiwanStockPrice", start_date=(datetime.now()-timedelta(days=5)).strftime('%Y-%m-%d'))
+            if not all_m.empty:
+                latest = all_m['date'].max()
+                res = all_m[all_m['date'] == latest].copy()
                 res['漲幅%'] = ((res['close'] - res['open']) / res['open'] * 100).round(2)
-                final = res[(res['漲幅%'] > 2) & (res['volume'] >= vol_filter*1000)].merge(master_df[['stock_id', 'stock_name']], on='stock_id')
-                st.dataframe(final[['stock_id', 'stock_name', 'close', '漲幅%', 'volume']].sort_values('漲幅%', ascending=False), use_container_width=True)
-                
+                # 篩選成交量與漲幅
+                final = res[(res['漲幅%'] > 2) & (res['volume'] >= vol_min*1000)].merge(master_df[['stock_id', 'stock_name']], on='stock_id')
+                st.dataframe(final[['stock_id', 'stock_name', 'close', '漲幅%', 'volume']].sort_values('漲幅%', ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.error("掃描超時或失敗，請稍後再試。")
 
-# TAB 3 & 4 邏輯同上，已加入防錯機制...
+# --- TAB 3: 籌碼動向 ---
+with tabs[2]:
+    sid = st.session_state.current_sid
+    st.subheader(f"🐳 {sid} 大戶持股趨勢")
+    chip_df = safe_fetch("TaiwanStockShareholding", sid, (datetime.now()-timedelta(days=120)).strftime('%Y-%m-%d'))
+    if not chip_df.empty:
+        # 過濾數值，確保 line_chart 不報錯
+        big = chip_df[chip_df['stock_hold_level'] == '1000以上'].sort_values('date')
+        if not big.empty:
+            st.line_chart(big.set_index('date')[['percent']])
+        else:
+            st.info("該標的無千張大戶統計數據。")
