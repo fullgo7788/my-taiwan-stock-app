@@ -5,15 +5,15 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import time
+import requests
 
 # --- 1. 系統初始化 ---
-st.set_page_config(page_title="AlphaRadar", layout="wide")
+st.set_page_config(page_title="AlphaRadar | 全市場版", layout="wide")
 
-# 初始化 Session State，確保 active_sid 永遠存在
 if 'active_sid' not in st.session_state:
     st.session_state.active_sid = "2330"
 
-FINMIND_TOKEN = "fullgo" # 建議填入 Token 以提高穩定性
+FINMIND_TOKEN = "fullgo" # 建議填入以維持穩定抓取
 
 @st.cache_resource
 def get_loader():
@@ -43,98 +43,107 @@ def safe_fetch(dataset, data_id=None, start_date=None):
     except: pass
     return pd.DataFrame()
 
-# --- 3. 獲取全台個股清單 (排除 ETF) ---
+# --- 3. 抓取證交所與櫃買中心官方名單 (上市+上櫃) ---
 @st.cache_data(ttl=86400)
-def get_stock_universe():
-    info_df = safe_fetch("TaiwanStockInfo")
-    
-    # 如果 API 有回傳
-    if not info_df.empty:
-        # 正則表達式：^\\d{4}$ 代表精準匹配「4位數字」，這會自動過濾掉 ETF (5-6位)
-        df = info_df[info_df['stock_id'].str.match(r'^\d{4}$', na=False)].copy()
-        
-        # 排除權證與特殊股
-        df = df[~df['stock_name'].str.contains("購|售|牛|熊", na=False)]
-        df['display'] = df['stock_id'] + " " + df['stock_name']
-        return df.sort_values('stock_id').reset_index(drop=True)
-    
-    # API 失敗時的強化備援名單 (確保選單有內容)
-    backup_data = [
-        {"stock_id": "2330", "stock_name": "台積電"}, {"stock_id": "2317", "stock_name": "鴻海"},
-        {"stock_id": "2454", "stock_name": "聯發科"}, {"stock_id": "2303", "stock_name": "聯電"},
-        {"stock_id": "2603", "stock_name": "長榮"}, {"stock_id": "2382", "stock_name": "廣達"},
-        {"stock_id": "2881", "stock_name": "富邦金"}, {"stock_id": "2882", "stock_name": "國泰金"}
+def get_taiwan_stock_universe():
+    urls = [
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", # 上市
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"  # 上櫃
     ]
-    df_backup = pd.DataFrame(backup_data)
-    df_backup['display'] = df_backup['stock_id'] + " " + df_backup['stock_name']
-    return df_backup
+    all_stocks = []
+    
+    for url in urls:
+        try:
+            res = requests.get(url)
+            res.encoding = 'big5'
+            dfs = pd.read_html(res.text)
+            df = dfs[0]
+            df.columns = df.iloc[0]
+            df = df.iloc[1:]
+            
+            def extract_info(x):
+                try:
+                    # 分割全形空白
+                    parts = str(x).split('\u3000')
+                    # 篩選個股：代號長度為 4 且為純數字
+                    if len(parts) >= 2 and len(parts[0]) == 4 and parts[0].isdigit():
+                        return parts[0], parts[1]
+                except: pass
+                return None, None
 
-# 執行載入
-master_df = get_stock_universe()
+            df[['sid', 'sname']] = df['有價證券代號及名稱'].apply(lambda x: pd.Series(extract_info(x)))
+            valid_df = df.dropna(subset=['sid'])
+            all_stocks.append(valid_df[['sid', 'sname']])
+        except: continue
+        
+    if not all_stocks:
+        return pd.DataFrame([{"sid": "2330", "sname": "台積電", "display": "2330 台積電"}])
+    
+    final_df = pd.concat(all_stocks).drop_duplicates('sid')
+    final_df['display'] = final_df['sid'] + " " + final_df['sname']
+    return final_df.sort_values('sid').reset_index(drop=True)
+
+# 載入名單
+master_df = get_taiwan_stock_universe()
 display_options = master_df['display'].tolist()
-display_to_id = master_df.set_index('display')['stock_id'].to_dict()
+display_to_id = master_df.set_index('display')['sid'].to_dict()
 
-# --- 4. 側邊欄：同步邏輯 (徹底修復點) ---
+# --- 4. 側邊欄同步邏輯 ---
 def on_select_change():
-    # 當下拉選單變動，立刻將選中的 ID 寫入 session_state
-    selected_text = st.session_state.stock_selector_key
-    st.session_state.active_sid = display_to_id[selected_text]
+    # 強制將新選擇的代號同步到 session_state
+    new_label = st.session_state.master_selector
+    st.session_state.active_sid = display_to_id[new_label]
 
-# 找出當前 active_sid 在清單中的位置
+# 計算當前預設位置
 try:
-    current_label = master_df[master_df['stock_id'] == st.session_state.active_sid]['display'].values[0]
-    curr_idx = display_options.index(current_label)
+    curr_label = master_df[master_df['sid'] == st.session_state.active_sid]['display'].values[0]
+    curr_idx = display_options.index(curr_label)
 except:
     curr_idx = 0
 
 with st.sidebar:
-    st.header("⚡ 策略中心")
-    # 核心修復：結合 key, index 與 on_change
+    st.header("📊 全台個股中心")
     st.selectbox(
-        "🔍 搜尋全台個股",
+        "🔍 搜尋上市/上櫃個股",
         options=display_options,
         index=curr_idx,
-        key="stock_selector_key",
+        key="master_selector",
         on_change=on_select_change
     )
     st.divider()
-    st.caption(f"當前鎖定標的: {st.session_state.active_sid}")
+    st.caption(f"當前鎖定：{st.session_state.active_sid}")
+    st.info("資料來源：TWSE/TPEx 官方 ISIN")
 
 # --- 5. 主分頁 ---
-tabs = st.tabs(["📊 技術分析", "🎯 大戶發動名單"])
+tabs = st.tabs(["📊 技術分析圖", "🎯 大戶籌碼掃描"])
 
 with tabs[0]:
     sid = st.session_state.active_sid
-    df_raw = safe_fetch("TaiwanStockPrice", sid, (datetime.now()-timedelta(days=450)).strftime('%Y-%m-%d'))
+    # 抓取足以計算指標的長度
+    df_raw = safe_fetch("TaiwanStockPrice", sid, (datetime.now()-timedelta(days=400)).strftime('%Y-%m-%d'))
     
     if not df_raw.empty:
         df = df_raw.copy()
-        # 指標計算
         df['ma5'] = df['close'].rolling(5).mean()
         df['ma20'] = df['close'].rolling(20).mean()
         df['ma60'] = df['close'].rolling(60).mean()
         
-        plot_df = df.dropna(subset=['ma5']).tail(180).copy()
+        plot_df = df.dropna(subset=['ma5']).tail(180)
         
         if not plot_df.empty:
-            # 數據純淨化：日期轉字串，數值轉 list
             d_str = plot_df['date'].dt.strftime('%Y-%m-%d').tolist()
-            
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
             
-            # K線圖
             fig.add_trace(go.Candlestick(
                 x=d_str, open=plot_df['open'].tolist(), high=plot_df['high'].tolist(),
                 low=plot_df['low'].tolist(), close=plot_df['close'].tolist(),
                 increasing_line_color='#FF3232', decreasing_line_color='#00AA00', name="K線"
             ), row=1, col=1)
             
-            # 均線
             fig.add_trace(go.Scatter(x=d_str, y=plot_df['ma5'].tolist(), line=dict(color='white', width=1), name="5MA"), row=1, col=1)
             fig.add_trace(go.Scatter(x=d_str, y=plot_df['ma20'].tolist(), line=dict(color='#FFD700', width=2), name="20MA"), row=1, col=1)
             fig.add_trace(go.Scatter(x=d_str, y=plot_df['ma60'].tolist(), line=dict(color='#00FFFF', width=1.5), name="60MA"), row=1, col=1)
             
-            # 成交量
             fig.add_trace(go.Bar(x=d_str, y=plot_df['volume'].tolist(), marker_color='gray', opacity=0.4), row=2, col=1)
             
             fig.update_layout(
@@ -145,12 +154,9 @@ with tabs[0]:
                                  showarrow=False, font=dict(color="white", size=14))]
             )
             st.plotly_chart(fig, use_container_width=True)
-            
-        else:
-            st.warning("數據長度不足以繪製指標。")
     else:
-        st.error(f"無法取得代號 {sid} 的歷史數據。")
+        st.error(f"目前代號 {sid} 抓取不到足夠的歷史數據。")
 
 with tabs[1]:
-    st.subheader("🎯 大戶策略分析")
-    st.button("🚀 執行全市場掃描")
+    st.subheader("🎯 策略分析")
+    st.button("🚀 開始全市場掃描")
