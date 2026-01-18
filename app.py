@@ -11,18 +11,14 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="AlphaRadar | Pro", layout="wide")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 強制注入 CSS 讓整個網頁變成黑底
+# 強制注入 CSS 讓全網頁黑底並優化側邊欄文字
 st.markdown("""
     <style>
-    .stApp {
-        background-color: #0E1117;
-    }
-    header[data-testid="stHeader"] {
-        background: rgba(0,0,0,0);
-    }
-    .stSelectbox label {
-        color: white !important;
-    }
+    .stApp { background-color: #000000; }
+    header[data-testid="stHeader"] { background: rgba(0,0,0,0); }
+    [data-testid="stSidebar"] { background-color: #111111; }
+    .stSelectbox label { color: white !important; }
+    h1, h2, h3, p { color: #E0E0E0 !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -60,7 +56,7 @@ if 'active_sid' not in st.session_state:
 def sync_selection():
     st.session_state.active_sid = id_map[st.session_state.stock_selector_key]
 
-# --- 4. 數據抓取 ---
+# --- 4. 數據抓取與指標計算 ---
 @st.cache_resource
 def get_loader(): return DataLoader()
 
@@ -75,7 +71,7 @@ def fetch_data(sid):
         price['date'] = pd.to_datetime(price['date'])
         df = price.sort_values('date')
         
-        # 計算指標
+        # 指標計算
         df['ma20'] = df['close'].rolling(20).mean()
         df['std20'] = df['close'].rolling(20).std()
         df['upper'] = df['ma20'] + (df['std20'] * 2)
@@ -90,7 +86,7 @@ def fetch_data(sid):
 
 # --- 5. 側邊欄 ---
 with st.sidebar:
-    st.title("AlphaRadar")
+    st.title("阿爾法雷達")
     st.selectbox("🔍 搜尋標的", options=display_list, 
                  index=display_list.index(next(s for s in display_list if st.session_state.active_sid in s)), 
                  key="stock_selector_key", on_change=sync_selection)
@@ -101,7 +97,7 @@ with st.sidebar:
 df = fetch_data(st.session_state.active_sid)
 
 if not df.empty:
-    pdf = df.tail(100)
+    pdf = df.tail(120)
     d_str = pdf['date'].dt.strftime('%Y-%m-%d').tolist()
 
     fig = make_subplots(
@@ -110,32 +106,40 @@ if not df.empty:
         subplot_titles=("K線 / 布林通道", "MACD 趨勢指標", "指標參數", "成交量")
     )
 
-    # 主圖
-    fig.add_trace(go.Candlestick(x=d_str, open=pdf['open'], high=pdf['high'], low=pdf['low'], close=pdf['close'], name="K線"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=d_str, y=pdf['upper'], line=dict(color='rgba(0, 255, 255, 0.3)', width=1, dash='dot'), name="上軌"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=d_str, y=pdf['lower'], line=dict(color='rgba(0, 255, 255, 0.3)', width=1, dash='dot'), name="下軌"), row=1, col=1)
+    # 1. K線圖 (亮紅漲、螢光綠跌)
+    fig.add_trace(go.Candlestick(
+        x=d_str, open=pdf['open'], high=pdf['high'], low=pdf['low'], close=pdf['close'], 
+        increasing_line_color='#FF0000', increasing_fillcolor='#FF0000',
+        decreasing_line_color='#00FF00', decreasing_fillcolor='#00FF00',
+        name="K線"
+    ), row=1, col=1)
+    
+    # 亮化布林通道 (亮青色)
+    fig.add_trace(go.Scatter(x=d_str, y=pdf['upper'], line=dict(color='#00FFFF', width=1.5, dash='dot'), name="上軌"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=d_str, y=pdf['lower'], line=dict(color='#00FFFF', width=1.5, dash='dot'), name="下軌"), row=1, col=1)
 
-    # MACD
-    m_colors = ['#FF3232' if x > 0 else '#00AA00' for x in pdf['macd_hist']]
+    # 2. MACD (紅漲亮綠跌)
+    m_colors = ['#FF0000' if x > 0 else '#00FF00' for x in pdf['macd_hist']]
     fig.add_trace(go.Bar(x=d_str, y=pdf['macd_hist'], marker_color=m_colors, name="MACD柱"), row=2, col=1)
     fig.add_trace(go.Scatter(x=d_str, y=pdf['dif'], line=dict(color='#FFFF00', width=1.5), name="DIF"), row=2, col=1)
     fig.add_trace(go.Scatter(x=d_str, y=pdf['dea'], line=dict(color='#FFA500', width=1.5), name="DEA"), row=2, col=1)
 
-    # 成交量
-    v_colors = ['#FF3232' if pdf['close'].iloc[i] >= pdf['open'].iloc[i] else '#00AA00' for i in range(len(pdf))]
+    # 3. 成交量 (與 K 棒顏色連動)
+    v_colors = ['#FF0000' if pdf['close'].iloc[i] >= pdf['open'].iloc[i] else '#00FF00' for i in range(len(pdf))]
     fig.add_trace(go.Bar(x=d_str, y=pdf['volume'], marker_color=v_colors, name="成交量"), row=4, col=1)
 
     fig.update_layout(
         height=900, 
         template="plotly_dark",
-        paper_bgcolor='rgba(0,0,0,0)', # 背景透明以配合 CSS
-        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='#000000', 
+        plot_bgcolor='#000000',
         showlegend=False, 
         xaxis_rangeslider_visible=False,
-        margin=dict(t=50, b=20, l=10, r=10)
+        margin=dict(t=50, b=20, l=10, r=10),
+        xaxis=dict(gridcolor='#222222'),
+        yaxis=dict(gridcolor='#222222')
     )
     st.plotly_chart(fig, use_container_width=True)
     
-
 else:
-    st.info("請從左側選擇個股以開啟圖表")
+    st.info("正在抓取數據，請稍候...")
